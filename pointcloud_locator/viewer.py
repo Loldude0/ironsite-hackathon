@@ -11,13 +11,13 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import numpy as np
 
 from .camera import pixel_to_ray
 from .ray_caster import RayCaster
-from .types import BoundingBox, CameraIntrinsics
+from .types import BoundingBox, BoundingBox2D, CameraIntrinsics
 from .point_cloud import load_point_cloud
 
 
@@ -27,6 +27,115 @@ HARD_CODED_SAMPLE_BBOXES = [
     BoundingBox(x_center=430.0, y_center=210.0, width=120.0, height=95.0, class_name="object_right", confidence=0.90),
     BoundingBox(x_center=320.0, y_center=320.0, width=140.0, height=100.0, class_name="object_low", confidence=0.88),
 ]
+
+
+def yolo_output_to_viewer_bboxes(yolo_output: Any) -> list[BoundingBox]:
+    """Convert Ultralytics YOLO output into viewer-compatible boxes.
+
+    Parameters
+    ----------
+    yolo_output : Any
+        Either a single ``ultralytics.engine.results.Results`` object or an
+        iterable of ``Results`` objects (e.g. from ``model.predict(...)``).
+
+    Returns
+    -------
+    list[BoundingBox]
+        Boxes in the same format used by ``HARD_CODED_SAMPLE_BBOXES``.
+    """
+
+    if yolo_output is None:
+        return []
+
+    if hasattr(yolo_output, "boxes"):
+        results_iter: Iterable[Any] = [yolo_output]
+    else:
+        results_iter = yolo_output
+
+    boxes: list[BoundingBox] = []
+
+    for result in results_iter:
+        names = getattr(result, "names", {})
+        for det in result.boxes:
+            xyxy = det.xyxy[0].cpu().numpy()
+            cls_id = int(det.cls[0])
+            conf = float(det.conf[0])
+
+            class_name = str(cls_id)
+            if isinstance(names, dict):
+                class_name = str(names.get(cls_id, class_name))
+            elif isinstance(names, list) and 0 <= cls_id < len(names):
+                class_name = str(names[cls_id])
+
+            box2d = BoundingBox2D(
+                x1=float(xyxy[0]),
+                y1=float(xyxy[1]),
+                x2=float(xyxy[2]),
+                y2=float(xyxy[3]),
+                class_id=cls_id,
+                class_name=class_name,
+                confidence=conf,
+            )
+            boxes.append(box2d.to_bounding_box())
+
+    return boxes
+
+
+def scale_bboxes_to_image_size(
+    bounding_boxes: list[BoundingBox],
+    source_size: tuple[int, int],
+    target_size: tuple[int, int],
+    clip: bool = True,
+) -> list[BoundingBox]:
+    """Scale viewer-compatible boxes from one image size to another.
+
+    Parameters
+    ----------
+    bounding_boxes : list[BoundingBox]
+        Boxes in source image pixel coordinates.
+    source_size : tuple[int, int]
+        Source ``(width, height)`` used by detections.
+    target_size : tuple[int, int]
+        Target ``(width, height)`` expected by camera intrinsics.
+    clip : bool
+        Clip transformed box corners to target image bounds.
+    """
+    src_w, src_h = source_size
+    dst_w, dst_h = target_size
+
+    if src_w <= 0 or src_h <= 0 or dst_w <= 0 or dst_h <= 0:
+        return list(bounding_boxes)
+
+    sx = float(dst_w) / float(src_w)
+    sy = float(dst_h) / float(src_h)
+
+    if abs(sx - 1.0) < 1e-9 and abs(sy - 1.0) < 1e-9:
+        return list(bounding_boxes)
+
+    scaled: list[BoundingBox] = []
+    for bbox in bounding_boxes:
+        x1 = (bbox.x_center - bbox.width / 2.0) * sx
+        y1 = (bbox.y_center - bbox.height / 2.0) * sy
+        x2 = (bbox.x_center + bbox.width / 2.0) * sx
+        y2 = (bbox.y_center + bbox.height / 2.0) * sy
+
+        if clip:
+            x1 = float(np.clip(x1, 0.0, float(dst_w)))
+            y1 = float(np.clip(y1, 0.0, float(dst_h)))
+            x2 = float(np.clip(x2, 0.0, float(dst_w)))
+            y2 = float(np.clip(y2, 0.0, float(dst_h)))
+
+        scaled.append(BoundingBox.from_xyxy(
+            x1=x1,
+            y1=y1,
+            x2=x2,
+            y2=y2,
+            class_id=bbox.class_id,
+            class_name=bbox.class_name,
+            confidence=bbox.confidence,
+        ))
+
+    return scaled
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -297,6 +406,8 @@ def view_point_cloud(
     max_points: int = 750_000,
     camera_config: Path = Path("assets/sample_camera_config.json"),
     ray_radius: float = 0.08,
+    bounding_boxes: list[BoundingBox] | None = None,
+    bbox_image_size: tuple[int, int] | None = None,
 ) -> None:
     """Open a point cloud in an interactive Open3D viewer."""
     try:
@@ -311,8 +422,18 @@ def view_point_cloud(
     if len(points) == 0:
         raise ValueError(f"No points found in file: {path}")
 
+    active_bboxes = bounding_boxes if bounding_boxes is not None else HARD_CODED_SAMPLE_BBOXES
+
     intrinsics, camera_position, camera_euler_deg, plane_distance = _load_camera_config(camera_config)
     camera_rotation = _euler_deg_to_matrix(camera_euler_deg)
+
+    if bounding_boxes is not None and bbox_image_size is not None:
+        active_bboxes = scale_bboxes_to_image_size(
+            bounding_boxes=active_bboxes,
+            source_size=bbox_image_size,
+            target_size=(intrinsics.width, intrinsics.height),
+            clip=True,
+        )
 
     points = _maybe_downsample(points, max_points=max_points)
     base_colors = _color_by_height(points)
@@ -372,7 +493,7 @@ def view_point_cloud(
             intrinsics=intrinsics,
             camera_position=camera_position,
             camera_rotation=camera_rotation,
-            bboxes=HARD_CODED_SAMPLE_BBOXES,
+            bboxes=active_bboxes,
             plane_distance=plane_distance,
         )
 
@@ -381,7 +502,7 @@ def view_point_cloud(
         hit_lines: list[list[int]] = []
         hit_colors: list[list[float]] = []
 
-        for i, bbox in enumerate(HARD_CODED_SAMPLE_BBOXES):
+        for i, bbox in enumerate(active_bboxes):
             origin, direction = pixel_to_ray(
                 u=bbox.x_center,
                 v=bbox.y_center,
@@ -576,8 +697,9 @@ def view_point_cloud(
     print("    H           : print current camera parameters")
     print("    P           : save current camera params to config file")
     print(f"  Camera world position: ({camera_position[0]:+.3f}, {camera_position[1]:+.3f}, {camera_position[2]:+.3f})")
-    print(f"  Hard-coded bounding boxes: {len(HARD_CODED_SAMPLE_BBOXES)}")
-    print(f"  First bbox center (world on floating plane): ({bbox_center[0]:+.3f}, {bbox_center[1]:+.3f}, {bbox_center[2]:+.3f})")
+    print(f"  Active bounding boxes: {len(active_bboxes)}")
+    if len(active_bboxes) > 0:
+        print(f"  First bbox center (world on floating plane): ({bbox_center[0]:+.3f}, {bbox_center[1]:+.3f}, {bbox_center[2]:+.3f})")
 
     vis.run()
     vis.destroy_window()

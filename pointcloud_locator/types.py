@@ -105,6 +105,34 @@ class BoundingBox:
 
 
 @dataclass
+class BoundingBox2D:
+    """2-D detection box in corner format ``(x1, y1, x2, y2)``.
+
+    This class is a convenience wrapper when working with detector outputs
+    that naturally provide corner coordinates (e.g. Ultralytics YOLO).
+    """
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    class_id: int = 0
+    class_name: str = ""
+    confidence: float = 1.0
+
+    def to_bounding_box(self) -> BoundingBox:
+        """Convert to viewer-compatible :class:`BoundingBox` format."""
+        return BoundingBox.from_xyxy(
+            x1=self.x1,
+            y1=self.y1,
+            x2=self.x2,
+            y2=self.y2,
+            class_id=self.class_id,
+            class_name=self.class_name,
+            confidence=self.confidence,
+        )
+
+
+@dataclass
 class HitResult:
     """Result of a single ray-cast against the point cloud.
 

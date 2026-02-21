@@ -9,14 +9,16 @@ Usage
 >>> hits = locator.locate(camera_pos, camera_rot, bounding_boxes)
 """
 
-from .types import CameraIntrinsics, BoundingBox, HitResult
+from .types import CameraIntrinsics, BoundingBox, BoundingBox2D, HitResult
 from .locator import ObjectLocator
-from .viewer import view_point_cloud
+from .viewer import view_point_cloud, yolo_output_to_viewer_bboxes
 
 __all__ = [
     "ObjectLocator",
     "view_point_cloud",
     "CameraIntrinsics",
     "BoundingBox",
+    "BoundingBox2D",
     "HitResult",
+    "yolo_output_to_viewer_bboxes",
 ]
