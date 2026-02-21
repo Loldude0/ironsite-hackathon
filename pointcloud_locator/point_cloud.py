@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, Tuple
-
 import numpy as np
 
 
@@ -16,7 +14,7 @@ def load_point_cloud(
     Supported formats
     -----------------
     * ``.ply``  – Stanford PLY (ASCII and binary little-endian)
-    * ``.pcd``  – Point Cloud Data (ASCII and binary)
+    * ``.pcd``  – Point Cloud Data (ASCII, binary, and binary_compressed)
     * ``.xyz`` / ``.txt`` / ``.csv`` – Whitespace- or comma-delimited text
         with at least three numeric columns (X Y Z …).
     * ``.npy`` – NumPy binary array of shape (N, ≥3).
@@ -45,18 +43,20 @@ def load_point_cloud(
     suffix = filepath.suffix.lower()
 
     if suffix == ".ply":
-        return _load_ply(filepath)
+        points = _load_ply(filepath)
     elif suffix == ".pcd":
-        return _load_pcd(filepath)
+        points = _load_pcd(filepath)
     elif suffix in (".xyz", ".txt", ".csv"):
-        return _load_text(filepath)
+        points = _load_text(filepath)
     elif suffix == ".npy":
-        return _load_npy(filepath)
+        points = _load_npy(filepath)
     else:
         raise ValueError(
             f"Unsupported point cloud format '{suffix}'. "
             "Supported: .ply, .pcd, .xyz, .txt, .csv, .npy"
         )
+
+    return _drop_non_finite_points(points)
 
 
 # --------------------------------------------------------------------------- #
@@ -153,10 +153,9 @@ def _load_ply(filepath: Path) -> np.ndarray:
 
 
 def _load_pcd(filepath: Path) -> np.ndarray:
-    """Parse a PCD (Point Cloud Data) file – ASCII and binary modes."""
+    """Parse a PCD (Point Cloud Data) file – ASCII, binary, and compressed."""
     with open(filepath, "rb") as f:
         header: dict[str, str] = {}
-        header_size = 0
         while True:
             line = f.readline()
             if not line:
@@ -164,7 +163,6 @@ def _load_pcd(filepath: Path) -> np.ndarray:
             decoded = line.decode("ascii", errors="replace").strip()
             if decoded.startswith("DATA"):
                 header["DATA"] = decoded.split()[1]
-                header_size = f.tell()
                 break
             key = decoded.split()[0]
             header[key] = decoded[len(key):].strip()
@@ -172,6 +170,14 @@ def _load_pcd(filepath: Path) -> np.ndarray:
         fields = header.get("FIELDS", "x y z").split()
         n_points = int(header.get("POINTS", header.get("WIDTH", "0")))
         data_mode = header.get("DATA", "ascii").lower()
+        sizes = list(map(int, header.get("SIZE", "4 4 4").split()))
+        types = header.get("TYPE", "F F F").split()
+        counts = list(map(int, header.get("COUNT", " ".join(["1"] * len(fields))).split()))
+
+        if not (len(fields) == len(sizes) == len(types) == len(counts)):
+            raise ValueError(
+                "Malformed PCD header: FIELDS/SIZE/TYPE/COUNT lengths differ."
+            )
 
         try:
             xi = fields.index("x")
@@ -188,12 +194,10 @@ def _load_pcd(filepath: Path) -> np.ndarray:
             return np.array(rows, dtype=np.float64)
 
         elif data_mode == "binary":
-            sizes = list(map(int, header.get("SIZE", "4 4 4").split()))
-            types = header.get("TYPE", "F F F").split()
             _pcd_type_map = {
-                ("F", 4): np.float32, ("F", 8): np.float64,
-                ("U", 1): np.uint8, ("U", 2): np.uint16, ("U", 4): np.uint32,
-                ("I", 1): np.int8, ("I", 2): np.int16, ("I", 4): np.int32,
+                ("F", 4): np.dtype("<f4"), ("F", 8): np.dtype("<f8"),
+                ("U", 1): np.dtype("<u1"), ("U", 2): np.dtype("<u2"), ("U", 4): np.dtype("<u4"),
+                ("I", 1): np.dtype("<i1"), ("I", 2): np.dtype("<i2"), ("I", 4): np.dtype("<i4"),
             }
             dtypes = []
             for i, field_name in enumerate(fields):
@@ -208,8 +212,115 @@ def _load_pcd(filepath: Path) -> np.ndarray:
             ])
             return points
 
+        elif data_mode == "binary_compressed":
+            hdr = f.read(8)
+            if len(hdr) != 8:
+                raise ValueError("Malformed binary_compressed PCD payload header.")
+
+            compressed_size = int(np.frombuffer(hdr[:4], dtype="<u4")[0])
+            uncompressed_size = int(np.frombuffer(hdr[4:], dtype="<u4")[0])
+            compressed_blob = f.read(compressed_size)
+            if len(compressed_blob) != compressed_size:
+                raise ValueError("Unexpected end of file in compressed PCD payload.")
+
+            raw_blob = _lzf_decompress(compressed_blob, uncompressed_size)
+
+            _pcd_type_map = {
+                ("F", 4): np.dtype("<f4"), ("F", 8): np.dtype("<f8"),
+                ("U", 1): np.dtype("<u1"), ("U", 2): np.dtype("<u2"), ("U", 4): np.dtype("<u4"),
+                ("I", 1): np.dtype("<i1"), ("I", 2): np.dtype("<i2"), ("I", 4): np.dtype("<i4"),
+            }
+
+            field_offsets: list[int] = []
+            offset = 0
+            for i in range(len(fields)):
+                field_offsets.append(offset)
+                offset += n_points * sizes[i] * counts[i]
+
+            if offset != len(raw_blob):
+                raise ValueError(
+                    "Decompressed binary_compressed payload size does not match header layout."
+                )
+
+            def _extract_xyz_component(field_idx: int) -> np.ndarray:
+                dt = _pcd_type_map.get((types[field_idx], sizes[field_idx]))
+                if dt is None:
+                    raise ValueError(
+                        f"Unsupported PCD field type/size for '{fields[field_idx]}': "
+                        f"TYPE={types[field_idx]} SIZE={sizes[field_idx]}"
+                    )
+
+                c = counts[field_idx]
+                start = field_offsets[field_idx]
+                n_vals = n_points * c
+                arr = np.frombuffer(raw_blob, dtype=dt, count=n_vals, offset=start)
+                if c > 1:
+                    arr = arr.reshape(n_points, c)[:, 0]
+                return arr.astype(np.float64)
+
+            points = np.column_stack([
+                _extract_xyz_component(xi),
+                _extract_xyz_component(yi),
+                _extract_xyz_component(zi),
+            ])
+            return points
+
         else:
             raise ValueError(f"Unsupported PCD data mode: {data_mode}")
+
+
+def _lzf_decompress(data: bytes, expected_size: int) -> bytes:
+    """Decompress PCD ``binary_compressed`` payload using LZF.
+
+    PCD stores a 32-bit compressed-size and uncompressed-size prefix,
+    followed by LZF-compressed bytes.
+    """
+    out = bytearray(expected_size)
+    ip = 0
+    op = 0
+    n = len(data)
+
+    while ip < n:
+        ctrl = data[ip]
+        ip += 1
+
+        if ctrl < 32:
+            length = ctrl + 1
+            if ip + length > n or op + length > expected_size:
+                raise ValueError("Invalid LZF stream (literal run out of bounds).")
+            out[op:op + length] = data[ip:ip + length]
+            ip += length
+            op += length
+        else:
+            length = ctrl >> 5
+            ref = op - ((ctrl & 0x1F) << 8) - 1
+
+            if length == 7:
+                if ip >= n:
+                    raise ValueError("Invalid LZF stream (missing length extension).")
+                length += data[ip]
+                ip += 1
+
+            if ip >= n:
+                raise ValueError("Invalid LZF stream (missing back-reference byte).")
+            ref -= data[ip]
+            ip += 1
+
+            length += 2
+            if ref < 0 or op + length > expected_size:
+                raise ValueError("Invalid LZF stream (back-reference out of bounds).")
+
+            for _ in range(length):
+                out[op] = out[ref]
+                op += 1
+                ref += 1
+
+    if op != expected_size:
+        raise ValueError(
+            f"Invalid LZF stream (decoded {op} bytes, expected {expected_size})."
+        )
+
+    return bytes(out)
 
 
 def _load_text(filepath: Path) -> np.ndarray:
@@ -238,3 +349,16 @@ def _load_npy(filepath: Path) -> np.ndarray:
             f"Expected (N, >=3) array, got shape {data.shape}."
         )
     return data[:, :3].copy()
+
+
+def _drop_non_finite_points(points: np.ndarray) -> np.ndarray:
+    """Remove rows that contain NaN/Inf values in XYZ coordinates."""
+    points = np.ascontiguousarray(points[:, :3], dtype=np.float64)
+    finite_mask = np.isfinite(points).all(axis=1)
+    if np.all(finite_mask):
+        return points
+
+    filtered = points[finite_mask]
+    if len(filtered) == 0:
+        raise ValueError("Point cloud contains no finite XYZ points after filtering NaN/Inf.")
+    return filtered
