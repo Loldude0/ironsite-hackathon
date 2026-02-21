@@ -15,18 +15,18 @@ from typing import Any
 
 import numpy as np
 
+from .camera import pixel_to_ray
+from .ray_caster import RayCaster
 from .types import BoundingBox, CameraIntrinsics
 from .point_cloud import load_point_cloud
 
 
-HARD_CODED_SAMPLE_BBOX = BoundingBox(
-    x_center=320.0,
-    y_center=240.0,
-    width=180.0,
-    height=120.0,
-    class_name="sample_object",
-    confidence=0.95,
-)
+HARD_CODED_SAMPLE_BBOXES = [
+    BoundingBox(x_center=320.0, y_center=240.0, width=180.0, height=120.0, class_name="object_center", confidence=0.95),
+    BoundingBox(x_center=210.0, y_center=180.0, width=110.0, height=90.0, class_name="object_left", confidence=0.92),
+    BoundingBox(x_center=430.0, y_center=210.0, width=120.0, height=95.0, class_name="object_right", confidence=0.90),
+    BoundingBox(x_center=320.0, y_center=320.0, width=140.0, height=100.0, class_name="object_low", confidence=0.88),
+]
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -55,6 +55,12 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=750_000,
         help="Randomly downsample if cloud is larger than this (default: 750000)",
+    )
+    parser.add_argument(
+        "--ray-radius",
+        type=float,
+        default=0.08,
+        help="Ray hit radius for selecting first point per bounding box (default: 0.08)",
     )
     return parser
 
@@ -212,12 +218,12 @@ def _save_camera_config(
     config_path.write_text(json.dumps(payload, indent=2) + "\n")
 
 
-def _image_plane_and_bbox(
+def _image_plane_and_bboxes(
     o3d,
     intrinsics: CameraIntrinsics,
     camera_position: np.ndarray,
     camera_rotation: np.ndarray,
-    bbox: BoundingBox,
+    bboxes: list[BoundingBox],
     plane_distance: float,
 ):
     def pixel_to_world(u: float, v: float) -> np.ndarray:
@@ -234,51 +240,55 @@ def _image_plane_and_bbox(
     ]
     plane_corners_w = [pixel_to_world(u, v) for u, v in plane_corners_px]
 
-    x1 = bbox.x_center - bbox.width / 2.0
-    y1 = bbox.y_center - bbox.height / 2.0
-    x2 = bbox.x_center + bbox.width / 2.0
-    y2 = bbox.y_center + bbox.height / 2.0
+    points: list[np.ndarray] = list(plane_corners_w)
+    lines: list[list[int]] = [
+        [0, 1], [1, 2], [2, 3], [3, 0],
+    ]
+    colors: list[list[float]] = [
+        [0.1, 0.8, 1.0], [0.1, 0.8, 1.0], [0.1, 0.8, 1.0], [0.1, 0.8, 1.0],
+    ]
+    bbox_centers: list[np.ndarray] = []
 
-    box_corners_px = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
-    box_corners_w = [pixel_to_world(u, v) for u, v in box_corners_px]
-    box_center_w = pixel_to_world(bbox.x_center, bbox.y_center)
+    cam_idx = len(points)
+    points.append(camera_position)
 
-    points = np.asarray(plane_corners_w + box_corners_w + [camera_position, box_center_w], dtype=np.float64)
-    plane_offset = 0
-    box_offset = 4
-    cam_idx = 8
-    center_idx = 9
+    for bbox in bboxes:
+        x1 = bbox.x_center - bbox.width / 2.0
+        y1 = bbox.y_center - bbox.height / 2.0
+        x2 = bbox.x_center + bbox.width / 2.0
+        y2 = bbox.y_center + bbox.height / 2.0
 
-    lines = np.asarray([
-        [plane_offset + 0, plane_offset + 1],
-        [plane_offset + 1, plane_offset + 2],
-        [plane_offset + 2, plane_offset + 3],
-        [plane_offset + 3, plane_offset + 0],
-        [box_offset + 0, box_offset + 1],
-        [box_offset + 1, box_offset + 2],
-        [box_offset + 2, box_offset + 3],
-        [box_offset + 3, box_offset + 0],
-        [cam_idx, center_idx],
-    ], dtype=np.int32)
+        box_corners_px = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+        box_corners_w = [pixel_to_world(u, v) for u, v in box_corners_px]
+        box_center_w = pixel_to_world(bbox.x_center, bbox.y_center)
+        bbox_centers.append(box_center_w)
 
-    colors = np.asarray([
-        [0.1, 0.8, 1.0],
-        [0.1, 0.8, 1.0],
-        [0.1, 0.8, 1.0],
-        [0.1, 0.8, 1.0],
-        [1.0, 0.25, 0.25],
-        [1.0, 0.25, 0.25],
-        [1.0, 0.25, 0.25],
-        [1.0, 0.25, 0.25],
-        [1.0, 0.9, 0.1],
-    ], dtype=np.float64)
+        offset = len(points)
+        points.extend(box_corners_w)
+        center_idx = len(points)
+        points.append(box_center_w)
+
+        lines.extend([
+            [offset + 0, offset + 1],
+            [offset + 1, offset + 2],
+            [offset + 2, offset + 3],
+            [offset + 3, offset + 0],
+            [cam_idx, center_idx],
+        ])
+        colors.extend([
+            [1.0, 0.25, 0.25],
+            [1.0, 0.25, 0.25],
+            [1.0, 0.25, 0.25],
+            [1.0, 0.25, 0.25],
+            [1.0, 0.9, 0.1],
+        ])
 
     overlay = o3d.geometry.LineSet()
-    overlay.points = o3d.utility.Vector3dVector(points)
-    overlay.lines = o3d.utility.Vector2iVector(lines)
-    overlay.colors = o3d.utility.Vector3dVector(colors)
+    overlay.points = o3d.utility.Vector3dVector(np.asarray(points, dtype=np.float64))
+    overlay.lines = o3d.utility.Vector2iVector(np.asarray(lines, dtype=np.int32))
+    overlay.colors = o3d.utility.Vector3dVector(np.asarray(colors, dtype=np.float64))
 
-    return overlay, box_center_w
+    return overlay, bbox_centers
 
 
 def view_point_cloud(
@@ -286,6 +296,7 @@ def view_point_cloud(
     point_size: float = 2.0,
     max_points: int = 750_000,
     camera_config: Path = Path("assets/sample_camera_config.json"),
+    ray_radius: float = 0.08,
 ) -> None:
     """Open a point cloud in an interactive Open3D viewer."""
     try:
@@ -304,11 +315,13 @@ def view_point_cloud(
     camera_rotation = _euler_deg_to_matrix(camera_euler_deg)
 
     points = _maybe_downsample(points, max_points=max_points)
-    colors = _color_by_height(points)
+    base_colors = _color_by_height(points)
+    colors = base_colors.copy()
 
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(points)
     pcd.colors = o3d.utility.Vector3dVector(colors)
+    ray_caster = RayCaster(points)
 
     mins = np.min(points, axis=0)
     maxs = np.max(points, axis=0)
@@ -331,7 +344,7 @@ def view_point_cloud(
 
         camera_rotation = _euler_deg_to_matrix(camera_euler_deg)
 
-        for key in ("camera_axis", "camera_marker", "image_overlay"):
+        for key in ("camera_axis", "camera_marker", "image_overlay", "ray_hits_overlay"):
             if key in dynamic_geometries:
                 vis_obj.remove_geometry(dynamic_geometries[key], reset_bounding_box=False)
 
@@ -347,24 +360,68 @@ def view_point_cloud(
         camera_marker.paint_uniform_color([1.0, 0.65, 0.1])
         camera_marker.translate(camera_position)
 
-        image_overlay, bbox_center_local = _image_plane_and_bbox(
+        image_overlay, bbox_centers = _image_plane_and_bboxes(
             o3d=o3d,
             intrinsics=intrinsics,
             camera_position=camera_position,
             camera_rotation=camera_rotation,
-            bbox=HARD_CODED_SAMPLE_BBOX,
+            bboxes=HARD_CODED_SAMPLE_BBOXES,
             plane_distance=plane_distance,
         )
+
+        updated_colors = base_colors.copy()
+        hit_points: list[np.ndarray] = []
+        hit_lines: list[list[int]] = []
+        hit_colors: list[list[float]] = []
+
+        for i, bbox in enumerate(HARD_CODED_SAMPLE_BBOXES):
+            origin, direction = pixel_to_ray(
+                u=bbox.x_center,
+                v=bbox.y_center,
+                intrinsics=intrinsics,
+                camera_position=camera_position,
+                camera_rotation=camera_rotation,
+            )
+            hit_pos, _hit_dist, hit_idx = ray_caster.cast_ray(
+                origin=origin,
+                direction=direction,
+                radius=ray_radius,
+                max_range=200.0,
+            )
+
+            if hit_idx is not None and hit_pos is not None:
+                tint = np.array([1.0, 0.95 - 0.15 * (i % 3), 0.05 + 0.2 * (i % 4)], dtype=np.float64)
+                updated_colors[hit_idx] = np.clip(tint, 0.0, 1.0)
+
+                start_idx = len(hit_points)
+                hit_points.append(origin)
+                hit_points.append(hit_pos)
+                hit_lines.append([start_idx, start_idx + 1])
+                hit_colors.append([1.0, 0.95, 0.1])
+
+        pcd.colors = o3d.utility.Vector3dVector(updated_colors)
+        vis_obj.update_geometry(pcd)
+
+        ray_hits_overlay = None
+        if hit_lines:
+            ray_hits_overlay = o3d.geometry.LineSet()
+            ray_hits_overlay.points = o3d.utility.Vector3dVector(np.asarray(hit_points, dtype=np.float64))
+            ray_hits_overlay.lines = o3d.utility.Vector2iVector(np.asarray(hit_lines, dtype=np.int32))
+            ray_hits_overlay.colors = o3d.utility.Vector3dVector(np.asarray(hit_colors, dtype=np.float64))
 
         dynamic_geometries["camera_axis"] = camera_axis
         dynamic_geometries["camera_marker"] = camera_marker
         dynamic_geometries["image_overlay"] = image_overlay
+        if ray_hits_overlay is not None:
+            dynamic_geometries["ray_hits_overlay"] = ray_hits_overlay
 
         vis_obj.add_geometry(camera_axis, reset_bounding_box=False)
         vis_obj.add_geometry(camera_marker, reset_bounding_box=False)
         vis_obj.add_geometry(image_overlay, reset_bounding_box=False)
+        if ray_hits_overlay is not None:
+            vis_obj.add_geometry(ray_hits_overlay, reset_bounding_box=False)
         vis_obj.update_renderer()
-        return bbox_center_local
+        return bbox_centers[0] if bbox_centers else camera_position
 
     title = f"Point Cloud Viewer - {path.name} ({len(points):,} points)"
 
@@ -461,6 +518,7 @@ def view_point_cloud(
     print("  Q or Esc: quit")
     print("  XYZ axis + XY grid are shown at origin")
     print(f"  Camera config: {camera_config}")
+    print(f"  Ray radius for hit coloring: {ray_radius:.3f}")
     print("  Edit camera params:")
     print("    W/S A/D T/G : move +Z/-Z, -X/+X, +Y/-Y in camera local frame")
     print("    I/K J/L U/O : pitch+/-, yaw+/-, roll+/- (deg)")
@@ -469,13 +527,8 @@ def view_point_cloud(
     print("    H           : print current camera parameters")
     print("    P           : save current camera params to config file")
     print(f"  Camera world position: ({camera_position[0]:+.3f}, {camera_position[1]:+.3f}, {camera_position[2]:+.3f})")
-    print(
-        "  Hard-coded bbox on image plane: "
-        f"{HARD_CODED_SAMPLE_BBOX.class_name} "
-        f"(xc={HARD_CODED_SAMPLE_BBOX.x_center:.1f}, yc={HARD_CODED_SAMPLE_BBOX.y_center:.1f}, "
-        f"w={HARD_CODED_SAMPLE_BBOX.width:.1f}, h={HARD_CODED_SAMPLE_BBOX.height:.1f})"
-    )
-    print(f"  BBox center (world on floating plane): ({bbox_center[0]:+.3f}, {bbox_center[1]:+.3f}, {bbox_center[2]:+.3f})")
+    print(f"  Hard-coded bounding boxes: {len(HARD_CODED_SAMPLE_BBOXES)}")
+    print(f"  First bbox center (world on floating plane): ({bbox_center[0]:+.3f}, {bbox_center[1]:+.3f}, {bbox_center[2]:+.3f})")
 
     vis.run()
     vis.destroy_window()
@@ -488,6 +541,7 @@ def main() -> None:
         point_size=args.point_size,
         max_points=args.max_points,
         camera_config=args.camera_config,
+        ray_radius=args.ray_radius,
     )
 
 

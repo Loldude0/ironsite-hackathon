@@ -8,8 +8,16 @@
     "height": 480
   },
   "camera_pose": {
-    "position": [0.0, 0.0, 0.8],
-    "euler_deg": [0.0, 0.0, 0.0]
+    "position": [
+      0.0,
+      0.0,
+      0.8
+    ],
+    "euler_deg": [
+      -202.0,
+      2.0,
+      0.0
+    ]
   },
   "visualization": {
     "image_plane_distance": 0.2
