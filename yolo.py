@@ -20,12 +20,16 @@ class RealtimeYoloVideoBBoxStream:
 		conf: float | None = None,
 		iou: float | None = None,
 		device: str | None = None,
+		show_window: bool = False,
+		window_name: str = "YOLO Realtime",
 	) -> None:
 		self.video_path = Path(video_path)
 		self.model_path = Path(model_path)
 		self.conf = conf
 		self.iou = iou
 		self.device = device
+		self.show_window = show_window
+		self.window_name = window_name
 
 		self._lock = threading.Lock()
 		self._stop_event = threading.Event()
@@ -56,6 +60,16 @@ class RealtimeYoloVideoBBoxStream:
 			return self._last_error
 
 	def _run(self) -> None:
+		cv2 = None
+		if self.show_window:
+			try:
+				import cv2 as _cv2
+				cv2 = _cv2
+			except Exception as exc:
+				with self._lock:
+					self._last_error = RuntimeError(f"OpenCV is required for YOLO display window: {exc}")
+				return
+
 		try:
 			model = YOLO(str(self.model_path))
 
@@ -85,9 +99,23 @@ class RealtimeYoloVideoBBoxStream:
 					self._latest_boxes = boxes
 					self._latest_size = source_size
 					self._latest_seq += 1
+
+				if cv2 is not None:
+					annotated = result.plot()
+					cv2.imshow(self.window_name, annotated)
+					key = cv2.waitKey(1) & 0xFF
+					if key == ord("q"):
+						self._stop_event.set()
+						break
 		except Exception as exc:
 			with self._lock:
 				self._last_error = exc
+		finally:
+			if cv2 is not None:
+				try:
+					cv2.destroyWindow(self.window_name)
+				except Exception:
+					pass
 
 
 def predict_bboxes_for_viewer(

@@ -12,27 +12,30 @@ from pointcloud_locator.viewer import view_point_cloud
 from yolo import RealtimeYoloVideoBBoxStream
 
 
-def _load_realtime_config(config_path: Path) -> tuple[float, float | None, float | None, str | None]:
+def _load_realtime_config(config_path: Path) -> tuple[float, float | None, float | None, str | None, bool, str]:
     """Load realtime YOLO/viewer configuration.
 
     Returns
     -------
-    update_interval_ms, conf, iou, device
+    update_interval_ms, conf, iou, device, show_window, window_name
     """
     if not config_path.exists():
-        return 200.0, None, None, None
+        return 200.0, None, None, None, True, "YOLO Realtime"
 
     payload: dict[str, Any] = json.loads(config_path.read_text())
     update_interval_ms = float(payload.get("update_interval_ms", 200.0))
     yolo_cfg = payload.get("yolo", {}) if isinstance(payload.get("yolo", {}), dict) else {}
+    window_cfg = payload.get("window", {}) if isinstance(payload.get("window", {}), dict) else {}
     conf = yolo_cfg.get("conf")
     iou = yolo_cfg.get("iou")
     device = yolo_cfg.get("device")
+    show_window = bool(window_cfg.get("show", True))
+    window_name = str(window_cfg.get("name", "YOLO Realtime"))
 
     conf_v = float(conf) if conf is not None else None
     iou_v = float(iou) if iou is not None else None
     device_v = str(device) if device is not None else None
-    return update_interval_ms, conf_v, iou_v, device_v
+    return update_interval_ms, conf_v, iou_v, device_v, show_window, window_name
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -53,7 +56,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = _build_parser().parse_args()
 
-    update_interval_ms, conf, iou, device = _load_realtime_config(args.realtime_config)
+    update_interval_ms, conf, iou, device, show_window, window_name = _load_realtime_config(args.realtime_config)
 
     stream = RealtimeYoloVideoBBoxStream(
         video_path=args.video,
@@ -61,6 +64,8 @@ def main() -> None:
         conf=conf,
         iou=iou,
         device=device,
+        show_window=show_window,
+        window_name=window_name,
     )
     stream.start()
 
