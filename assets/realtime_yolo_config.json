@@ -1,0 +1,8 @@
+{
+  "update_interval_ms": 200,
+  "yolo": {
+    "conf": 0.25,
+    "iou": 0.45,
+    "device": null
+  }
+}

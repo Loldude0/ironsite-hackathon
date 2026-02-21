@@ -1,11 +1,93 @@
 from __future__ import annotations
 
 import argparse
+import threading
 from pathlib import Path
+from typing import Any
 
 from ultralytics import YOLO
 
 from pointcloud_locator import BoundingBox, yolo_output_to_viewer_bboxes
+
+
+class RealtimeYoloVideoBBoxStream:
+	"""Background YOLO stream that continuously publishes latest frame boxes."""
+
+	def __init__(
+		self,
+		video_path: str | Path,
+		model_path: str | Path = "yolo26n.pt",
+		conf: float | None = None,
+		iou: float | None = None,
+		device: str | None = None,
+	) -> None:
+		self.video_path = Path(video_path)
+		self.model_path = Path(model_path)
+		self.conf = conf
+		self.iou = iou
+		self.device = device
+
+		self._lock = threading.Lock()
+		self._stop_event = threading.Event()
+		self._thread: threading.Thread | None = None
+
+		self._latest_boxes: list[BoundingBox] = []
+		self._latest_size: tuple[int, int] | None = None
+		self._latest_seq: int = -1
+		self._last_error: Exception | None = None
+
+	def start(self) -> None:
+		if self._thread is not None:
+			return
+		self._thread = threading.Thread(target=self._run, name="yolo-video-stream", daemon=True)
+		self._thread.start()
+
+	def stop(self, timeout: float = 2.0) -> None:
+		self._stop_event.set()
+		if self._thread is not None:
+			self._thread.join(timeout=timeout)
+
+	def get_latest(self) -> tuple[list[BoundingBox], tuple[int, int] | None, int]:
+		with self._lock:
+			return list(self._latest_boxes), self._latest_size, self._latest_seq
+
+	def get_last_error(self) -> Exception | None:
+		with self._lock:
+			return self._last_error
+
+	def _run(self) -> None:
+		try:
+			model = YOLO(str(self.model_path))
+
+			predict_kwargs: dict[str, Any] = {
+				"source": str(self.video_path),
+				"stream": True,
+				"verbose": False,
+			}
+			if self.conf is not None:
+				predict_kwargs["conf"] = self.conf
+			if self.iou is not None:
+				predict_kwargs["iou"] = self.iou
+			if self.device is not None:
+				predict_kwargs["device"] = self.device
+
+			for result in model.predict(**predict_kwargs):
+				if self._stop_event.is_set():
+					break
+
+				boxes = yolo_output_to_viewer_bboxes(result)
+				source_size: tuple[int, int] | None = None
+				if hasattr(result, "orig_shape"):
+					h, w = result.orig_shape[:2]
+					source_size = (int(w), int(h))
+
+				with self._lock:
+					self._latest_boxes = boxes
+					self._latest_size = source_size
+					self._latest_seq += 1
+		except Exception as exc:
+			with self._lock:
+				self._last_error = exc
 
 
 def predict_bboxes_for_viewer(

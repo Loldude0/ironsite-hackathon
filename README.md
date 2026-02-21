@@ -11,24 +11,21 @@ Use `assets/sample_camera_config.json` (or your own JSON) to define:
 python -m pointcloud_locator.viewer assets/sample.pcd --camera-config assets/sample_camera_config.json --ray-radius 0.08
 ```
 
-### 2) Run YOLO only (convert detections to viewer box format)
+### 2) Run YOLO only (single image -> viewer box format)
 ```bash
 python yolo.py --image assets/sample_yolo.jpg --model yolo26n.pt
 ```
 
-### 3) End-to-end: YOLO + Viewer (recommended)
-This runs YOLO on an image, converts detections into the viewer-compatible bounding-box format, then launches the 3D viewer with those boxes.
+### 3) End-to-end realtime: MP4 + YOLO + Viewer (recommended)
+This runs YOLO on a video stream, updates detections in realtime, and refreshes the floating 2D plane bounding boxes and raycast targets inside the viewer.
 
 If YOLO image size differs from `intrinsics.width/height` in camera config, the boxes are automatically rescaled to keep the floating image plane and box overlay aligned.
 
 ```bash
-python viewer_entry.py assets/sample.pcd --image assets/sample_yolo.jpg --camera-config assets/sample_camera_config.json --model yolo26n.pt --ray-radius 0.08
+python viewer_entry.py assets/sample.pcd --video assets/sample_yolo.mp4 --camera-config assets/sample_camera_config.json --model yolo26n.pt --realtime-config assets/realtime_yolo_config.json --ray-radius 0.08
 ```
 
-Optional arguments (both scripts):
-- `--conf` YOLO confidence threshold
-- `--iou` YOLO IoU threshold
-- `--device` inference device (e.g. `cpu` or `0`)
+Realtime update cadence and default YOLO thresholds are configured in [assets/realtime_yolo_config.json](assets/realtime_yolo_config.json).
 
 Viewer-specific optional arguments:
 - `--point-size`

@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 import numpy as np
 
@@ -408,6 +409,8 @@ def view_point_cloud(
     ray_radius: float = 0.08,
     bounding_boxes: list[BoundingBox] | None = None,
     bbox_image_size: tuple[int, int] | None = None,
+    live_bbox_provider: Callable[[], tuple[list[BoundingBox], tuple[int, int] | None] | None] | None = None,
+    live_update_interval_ms: float = 200.0,
 ) -> None:
     """Open a point cloud in an interactive Open3D viewer."""
     try:
@@ -422,7 +425,7 @@ def view_point_cloud(
     if len(points) == 0:
         raise ValueError(f"No points found in file: {path}")
 
-    active_bboxes = bounding_boxes if bounding_boxes is not None else HARD_CODED_SAMPLE_BBOXES
+    active_bboxes = list(bounding_boxes) if bounding_boxes is not None else list(HARD_CODED_SAMPLE_BBOXES)
 
     intrinsics, camera_position, camera_euler_deg, plane_distance = _load_camera_config(camera_config)
     camera_rotation = _euler_deg_to_matrix(camera_euler_deg)
@@ -434,6 +437,21 @@ def view_point_cloud(
             target_size=(intrinsics.width, intrinsics.height),
             clip=True,
         )
+
+    def _bboxes_roughly_equal(a: list[BoundingBox], b: list[BoundingBox], eps: float = 1e-6) -> bool:
+        if len(a) != len(b):
+            return False
+        for aa, bb in zip(a, b):
+            if (
+                abs(aa.x_center - bb.x_center) > eps
+                or abs(aa.y_center - bb.y_center) > eps
+                or abs(aa.width - bb.width) > eps
+                or abs(aa.height - bb.height) > eps
+                or aa.class_id != bb.class_id
+                or aa.class_name != bb.class_name
+            ):
+                return False
+        return True
 
     points = _maybe_downsample(points, max_points=max_points)
     base_colors = _color_by_height(points)
@@ -701,7 +719,31 @@ def view_point_cloud(
     if len(active_bboxes) > 0:
         print(f"  First bbox center (world on floating plane): ({bbox_center[0]:+.3f}, {bbox_center[1]:+.3f}, {bbox_center[2]:+.3f})")
 
-    vis.run()
+    update_sec = max(float(live_update_interval_ms) / 1000.0, 0.01)
+    next_live_update_ts = time.perf_counter() + update_sec
+
+    while vis.poll_events():
+        now = time.perf_counter()
+        if live_bbox_provider is not None and now >= next_live_update_ts:
+            next_live_update_ts = now + update_sec
+            live_payload = live_bbox_provider()
+            if live_payload is not None:
+                live_boxes, live_image_size = live_payload
+                refreshed_boxes = list(live_boxes)
+                if live_image_size is not None:
+                    refreshed_boxes = scale_bboxes_to_image_size(
+                        bounding_boxes=refreshed_boxes,
+                        source_size=live_image_size,
+                        target_size=(intrinsics.width, intrinsics.height),
+                        clip=True,
+                    )
+                if not _bboxes_roughly_equal(refreshed_boxes, active_bboxes):
+                    active_bboxes = refreshed_boxes
+                    _apply_and_refresh("[live-yolo]")
+
+        vis.update_renderer()
+        time.sleep(0.005)
+
     vis.destroy_window()
 
 
