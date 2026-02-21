@@ -11,9 +11,11 @@ Usage
 
 from .types import CameraIntrinsics, BoundingBox, HitResult
 from .locator import ObjectLocator
+from .viewer import view_point_cloud
 
 __all__ = [
     "ObjectLocator",
+    "view_point_cloud",
     "CameraIntrinsics",
     "BoundingBox",
     "HitResult",
