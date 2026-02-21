@@ -411,6 +411,8 @@ def view_point_cloud(
     bbox_image_size: tuple[int, int] | None = None,
     live_bbox_provider: Callable[[], tuple[list[BoundingBox], tuple[int, int] | None] | None] | None = None,
     live_update_interval_ms: float = 200.0,
+    live_point_cloud_provider: Callable[[], np.ndarray | None] | None = None,
+    point_cloud_update_interval_ms: float = 200.0,
 ) -> None:
     """Open a point cloud in an interactive Open3D viewer."""
     try:
@@ -613,6 +615,24 @@ def view_point_cloud(
         bbox_center = rebuild_camera_geometries(vis)
         # _print_camera_state(prefix)
 
+    def _replace_point_cloud(new_points: np.ndarray, prefix: str) -> None:
+        nonlocal points, base_colors, ray_caster
+
+        if new_points.size == 0:
+            return
+
+        if new_points.ndim != 2 or new_points.shape[1] != 3:
+            raise ValueError("live_point_cloud_provider must return an array with shape (N, 3)")
+
+        points = _maybe_downsample(new_points, max_points=max_points)
+        base_colors = _color_by_height(points)
+        ray_caster = RayCaster(points)
+
+        pcd.points = o3d.utility.Vector3dVector(points)
+        pcd.colors = o3d.utility.Vector3dVector(base_colors.copy())
+        vis.update_geometry(pcd)
+        _apply_and_refresh(prefix)
+
     def _move_local(dx: float, dy: float, dz: float) -> None:
         nonlocal camera_position
         rot = _euler_deg_to_matrix(camera_euler_deg)
@@ -722,8 +742,18 @@ def view_point_cloud(
     update_sec = max(float(live_update_interval_ms) / 1000.0, 0.01)
     next_live_update_ts = time.perf_counter() + update_sec
 
+    pc_update_sec = max(float(point_cloud_update_interval_ms) / 1000.0, 0.01)
+    next_pc_update_ts = time.perf_counter() + pc_update_sec
+
     while vis.poll_events():
         now = time.perf_counter()
+
+        if live_point_cloud_provider is not None and now >= next_pc_update_ts:
+            next_pc_update_ts = now + pc_update_sec
+            latest_points = live_point_cloud_provider()
+            if latest_points is not None:
+                _replace_point_cloud(latest_points, "[live-pcd]")
+
         if live_bbox_provider is not None and now >= next_live_update_ts:
             next_live_update_ts = now + update_sec
             live_payload = live_bbox_provider()

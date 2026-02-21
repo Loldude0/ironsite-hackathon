@@ -26,8 +26,15 @@ If YOLO image size differs from `intrinsics.width/height` in camera config, the 
 python viewer_entry.py assets/sample.pcd --video assets/sample_yolo.mp4 --camera-config config/sample_camera_config.json --model yolo26n.pt --realtime-config config/realtime_yolo_config.json --ray-radius 0.08
 ```
 
+You can also pass a folder containing multiple `.pcd` files as the first argument. In that mode, the viewer updates the displayed point cloud frame-by-frame at the interval configured in `point_cloud.update_interval_ms`.
+
+```bash
+python viewer_entry.py assets/converted_pcd --video assets/sample_yolo.mp4 --camera-config config/sample_camera_config.json --model yolo26n.pt --realtime-config config/realtime_yolo_config.json --ray-radius 0.08
+```
+
 Realtime update cadence and default YOLO thresholds are configured in [config/realtime_yolo_config.json](config/realtime_yolo_config.json).
 Use `window.show` and `window.name` there to control the YOLO display window.
+Use `point_cloud.update_interval_ms` and `point_cloud.loop` there to control folder playback.
 
 Viewer-specific optional arguments:
 - `--point-size`
