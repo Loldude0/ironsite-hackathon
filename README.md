@@ -33,6 +33,18 @@ Viewer-specific optional arguments:
 - `--point-size`
 - `--max-points`
 
+### 4) Convert `.bag` LiDAR stream to multiple `.pcd` files
+Use this to extract PointCloud2 frames from a ROS `.bag` into a folder:
+
+```bash
+python bag_to_pcd.py --bag data/lidar.bag --output-dir data/pcd --topic /velodyne_points
+```
+
+Optional arguments:
+- `--every-n` save every Nth frame
+- `--max-frames` stop after saving a number of frames
+- `--topic` omit to auto-pick first PointCloud2 topic in the bag
+
 ### Controls
 
 - Left drag: rotate

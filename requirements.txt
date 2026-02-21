@@ -4,3 +4,4 @@ scipy
 ultralytics
 onnx
 opencv-python
+rosbags
