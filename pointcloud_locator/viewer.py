@@ -391,7 +391,7 @@ def view_point_cloud(
     def _apply_and_refresh(prefix: str) -> None:
         nonlocal bbox_center
         bbox_center = rebuild_camera_geometries(vis)
-        _print_camera_state(prefix)
+        # _print_camera_state(prefix)
 
     def _move_local(dx: float, dy: float, dz: float) -> None:
         nonlocal camera_position
