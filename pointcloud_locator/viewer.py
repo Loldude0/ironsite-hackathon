@@ -338,13 +338,20 @@ def view_point_cloud(
     grid = _create_xy_grid(o3d, half_extent=grid_half_extent, spacing=grid_spacing)
 
     dynamic_geometries: dict[str, Any] = {}
+    show_hit_radius_spheres = False
 
     def rebuild_camera_geometries(vis_obj) -> np.ndarray:
         nonlocal camera_rotation
 
         camera_rotation = _euler_deg_to_matrix(camera_euler_deg)
 
-        for key in ("camera_axis", "camera_marker", "image_overlay", "ray_hits_overlay"):
+        for key in (
+            "camera_axis",
+            "camera_marker",
+            "image_overlay",
+            "ray_hits_overlay",
+            "hit_radius_mesh",
+        ):
             if key in dynamic_geometries:
                 vis_obj.remove_geometry(dynamic_geometries[key], reset_bounding_box=False)
 
@@ -355,7 +362,7 @@ def view_point_cloud(
             rotation=camera_rotation,
         )
 
-        camera_marker = o3d.geometry.TriangleMesh.create_sphere(radius=max(axis_size * 0.05, 0.07))
+        camera_marker = o3d.geometry.TriangleMesh.create_sphere(radius=max(axis_size * 0.02, 0.025))
         camera_marker.compute_vertex_normals()
         camera_marker.paint_uniform_color([1.0, 0.65, 0.1])
         camera_marker.translate(camera_position)
@@ -409,17 +416,33 @@ def view_point_cloud(
             ray_hits_overlay.lines = o3d.utility.Vector2iVector(np.asarray(hit_lines, dtype=np.int32))
             ray_hits_overlay.colors = o3d.utility.Vector3dVector(np.asarray(hit_colors, dtype=np.float64))
 
+        hit_radius_mesh = None
+        if show_hit_radius_spheres and hit_lines:
+            for i in range(1, len(hit_points), 2):
+                sphere = o3d.geometry.TriangleMesh.create_sphere(radius=ray_radius)
+                sphere.compute_vertex_normals()
+                sphere.paint_uniform_color([1.0, 0.45, 0.1])
+                sphere.translate(hit_points[i])
+                if hit_radius_mesh is None:
+                    hit_radius_mesh = sphere
+                else:
+                    hit_radius_mesh += sphere
+
         dynamic_geometries["camera_axis"] = camera_axis
         dynamic_geometries["camera_marker"] = camera_marker
         dynamic_geometries["image_overlay"] = image_overlay
         if ray_hits_overlay is not None:
             dynamic_geometries["ray_hits_overlay"] = ray_hits_overlay
+        if hit_radius_mesh is not None:
+            dynamic_geometries["hit_radius_mesh"] = hit_radius_mesh
 
         vis_obj.add_geometry(camera_axis, reset_bounding_box=False)
         vis_obj.add_geometry(camera_marker, reset_bounding_box=False)
         vis_obj.add_geometry(image_overlay, reset_bounding_box=False)
         if ray_hits_overlay is not None:
             vis_obj.add_geometry(ray_hits_overlay, reset_bounding_box=False)
+        if hit_radius_mesh is not None:
+            vis_obj.add_geometry(hit_radius_mesh, reset_bounding_box=False)
         vis_obj.update_renderer()
         return bbox_centers[0] if bbox_centers else camera_position
 
@@ -442,7 +465,8 @@ def view_point_cloud(
         print(
             f"{prefix} pos=({camera_position[0]:+.3f}, {camera_position[1]:+.3f}, {camera_position[2]:+.3f}) "
             f"rpy_deg=({camera_euler_deg[0]:+.1f}, {camera_euler_deg[1]:+.1f}, {camera_euler_deg[2]:+.1f}) "
-            f"fx={intrinsics.fx:.1f} fy={intrinsics.fy:.1f} plane_d={plane_distance:.2f}"
+            f"fx={intrinsics.fx:.1f} fy={intrinsics.fy:.1f} plane_d={plane_distance:.2f} "
+            f"ray_r={ray_radius:.3f} show_hit_spheres={show_hit_radius_spheres}"
         )
 
     def _apply_and_refresh(prefix: str) -> None:
@@ -490,6 +514,29 @@ def view_point_cloud(
     vis.register_key_callback(ord("["), _plane_minus)
     vis.register_key_callback(ord("]"), _plane_plus)
 
+    def _radius_minus(_v):
+        nonlocal ray_radius
+        ray_radius = max(0.005, ray_radius - 0.01)
+        _apply_and_refresh("[ray-radius]")
+        return False
+
+    def _radius_plus(_v):
+        nonlocal ray_radius
+        ray_radius = ray_radius + 0.01
+        _apply_and_refresh("[ray-radius]")
+        return False
+
+    def _toggle_hit_radius_spheres(_v):
+        nonlocal show_hit_radius_spheres
+        show_hit_radius_spheres = not show_hit_radius_spheres
+        _apply_and_refresh("[hit-radius-spheres]")
+        print(f"[toggle] hit radius spheres: {show_hit_radius_spheres}")
+        return False
+
+    vis.register_key_callback(ord(","), _radius_minus)
+    vis.register_key_callback(ord("."), _radius_plus)
+    vis.register_key_callback(ord("V"), _toggle_hit_radius_spheres)
+
     def _save_cfg(_v):
         _save_camera_config(
             config_path=camera_config,
@@ -524,6 +571,8 @@ def view_point_cloud(
     print("    I/K J/L U/O : pitch+/-, yaw+/-, roll+/- (deg)")
     print("    Z/X         : decrease/increase fx, fy")
     print("    [ / ]       : move image plane nearer/farther")
+    print("    , / .       : decrease/increase ray hit radius")
+    print("    V           : toggle radius sphere visualization at each hit point")
     print("    H           : print current camera parameters")
     print("    P           : save current camera params to config file")
     print(f"  Camera world position: ({camera_position[0]:+.3f}, {camera_position[1]:+.3f}, {camera_position[2]:+.3f})")
