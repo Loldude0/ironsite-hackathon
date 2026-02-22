@@ -31,7 +31,7 @@ Stereo.b: 0.07732
 # Incoming depth from sender is meters.
 RGBD.DepthMapFactor: 1.0
 
-ORBextractor.nFeatures: 1250
+ORBextractor.nFeatures: 800
 ORBextractor.scaleFactor: 1.2
 ORBextractor.nLevels: 8
 ORBextractor.iniThFAST: 20

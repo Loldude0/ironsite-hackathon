@@ -16,7 +16,10 @@ ZMQ_ENDPOINT="${ZMQ_ENDPOINT:-tcp://0.0.0.0:5555}"
 ZMQ_TOPIC="${ZMQ_TOPIC:-rgbd}"
 ZMQ_BIND="${ZMQ_BIND:-1}"            # 1 => receiver binds, 0 => receiver connects
 ENABLE_VIEWER="${ENABLE_VIEWER:-1}"  # 1 => Pangolin on, 0 => off
-TRAJECTORY_PATH="${TRAJECTORY_PATH:-}"
+SENSOR_MODE="${SENSOR_MODE:-rgbd}"   # rgbd | monocular
+TRAJECTORY_PATH="${TRAJECTORY_PATH:-${REPO_ROOT}/outputs/trajectory_tum.txt}"
+KEYFRAME_TRAJECTORY_PATH="${KEYFRAME_TRAJECTORY_PATH:-${REPO_ROOT}/outputs/keyframes_tum.txt}"
+POINTCLOUD_PATH="${POINTCLOUD_PATH:-${REPO_ROOT}/outputs/map_points.ply}"
 
 if [[ "${ENABLE_VIEWER}" == "1" && -z "${DISPLAY:-}" ]]; then
   echo "[run] no DISPLAY detected; disabling Pangolin viewer (set ENABLE_VIEWER=1 once X11/xpra is available)"
@@ -97,6 +100,7 @@ CMD=(
   --settings-template "${SETTINGS_TEMPLATE}"
   --endpoint "${ZMQ_ENDPOINT}"
   --topic "${ZMQ_TOPIC}"
+  --sensor-mode "${SENSOR_MODE}"
 )
 
 if [[ "${ZMQ_BIND}" == "0" ]]; then
@@ -108,11 +112,17 @@ fi
 if [[ -n "${TRAJECTORY_PATH}" ]]; then
   CMD+=(--trajectory "${TRAJECTORY_PATH}")
 fi
+if [[ -n "${KEYFRAME_TRAJECTORY_PATH}" ]]; then
+  CMD+=(--keyframe-trajectory "${KEYFRAME_TRAJECTORY_PATH}")
+fi
+if [[ -n "${POINTCLOUD_PATH}" ]]; then
+  CMD+=(--pointcloud "${POINTCLOUD_PATH}")
+fi
 
 if [[ $# -gt 0 ]]; then
   CMD+=("$@")
 fi
 
 echo "[run] starting ORB bridge"
-echo "[run] endpoint=${ZMQ_ENDPOINT} topic=${ZMQ_TOPIC} bind=${ZMQ_BIND} viewer=${ENABLE_VIEWER}"
+echo "[run] endpoint=${ZMQ_ENDPOINT} topic=${ZMQ_TOPIC} bind=${ZMQ_BIND} viewer=${ENABLE_VIEWER} sensor=${SENSOR_MODE}"
 exec "${CMD[@]}"

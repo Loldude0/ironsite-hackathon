@@ -9,11 +9,13 @@
 #include <zmq.h>
 
 #include "System.h"
+#include "MapPoint.h"
 
 #include <algorithm>
 #include <atomic>
 #include <csignal>
 #include <cstdint>
+#include <cmath>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -22,6 +24,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <unistd.h>
@@ -48,6 +51,9 @@ struct Options {
   int rcv_hwm = 2;
   int poll_timeout_ms = 100;
   std::string trajectory_path;
+  std::string keyframe_trajectory_path;
+  std::string pointcloud_path;
+  std::string sensor_mode = "rgbd";  // rgbd | monocular
 };
 
 struct FrameMeta {
@@ -83,7 +89,10 @@ void PrintUsage(const char* prog) {
       << "  --no-viewer                      Disable Pangolin viewer\n"
       << "  --rcv-hwm <int>                  Default: 2\n"
       << "  --poll-timeout-ms <int>          Default: 100\n"
-      << "  --trajectory <path.txt>          Save TUM trajectory on shutdown\n";
+      << "  --sensor-mode <rgbd|monocular>   Default: rgbd\n"
+      << "  --trajectory <path.txt>          Save TUM trajectory on shutdown\n"
+      << "  --keyframe-trajectory <path.txt> Save TUM keyframe trajectory on shutdown\n"
+      << "  --pointcloud <path.ply>          Save tracked map points as PLY on shutdown\n";
 }
 
 bool ParseArgs(int argc, char** argv, Options* options) {
@@ -133,6 +142,18 @@ bool ParseArgs(int argc, char** argv, Options* options) {
       if (!need_value(arg, &options->trajectory_path)) {
         return false;
       }
+    } else if (arg == "--keyframe-trajectory") {
+      if (!need_value(arg, &options->keyframe_trajectory_path)) {
+        return false;
+      }
+    } else if (arg == "--pointcloud") {
+      if (!need_value(arg, &options->pointcloud_path)) {
+        return false;
+      }
+    } else if (arg == "--sensor-mode") {
+      if (!need_value(arg, &options->sensor_mode)) {
+        return false;
+      }
     } else if (arg == "--rcv-hwm") {
       if (!need_int(arg, &options->rcv_hwm)) {
         return false;
@@ -153,6 +174,10 @@ bool ParseArgs(int argc, char** argv, Options* options) {
 
   if (options->vocab_path.empty() || options->settings_template_path.empty()) {
     std::cerr << "--vocab and --settings-template are required\n";
+    return false;
+  }
+  if (options->sensor_mode != "rgbd" && options->sensor_mode != "monocular") {
+    std::cerr << "--sensor-mode must be rgbd or monocular\n";
     return false;
   }
   return true;
@@ -416,6 +441,37 @@ std::filesystem::path MaterializeRuntimeSettings(const std::filesystem::path& te
   return runtime_path;
 }
 
+struct PointXYZ {
+  float x = 0.0f;
+  float y = 0.0f;
+  float z = 0.0f;
+};
+
+void SavePointCloudPLY(const std::unordered_map<unsigned long, PointXYZ>& points_by_id,
+                       const std::filesystem::path& path) {
+  const auto parent = path.parent_path();
+  if (!parent.empty()) {
+    std::filesystem::create_directories(parent);
+  }
+  std::ofstream out(path);
+  if (!out) {
+    throw std::runtime_error("failed to write pointcloud file: " + path.string());
+  }
+
+  out << "ply\n";
+  out << "format ascii 1.0\n";
+  out << "element vertex " << points_by_id.size() << "\n";
+  out << "property float x\n";
+  out << "property float y\n";
+  out << "property float z\n";
+  out << "end_header\n";
+  out << std::fixed << std::setprecision(6);
+  for (const auto& [id, p] : points_by_id) {
+    (void)id;
+    out << p.x << " " << p.y << " " << p.z << "\n";
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -472,6 +528,8 @@ int main(int argc, char** argv) {
   std::unique_ptr<ORB_SLAM3::System> slam;
   std::filesystem::path runtime_settings;
   bool slam_initialized = false;
+  std::unordered_map<unsigned long, PointXYZ> map_points_by_id;
+  const bool use_rgbd = options.sensor_mode == "rgbd";
 
   std::size_t frames = 0;
   double t_log = MonotonicNowSec();
@@ -492,8 +550,10 @@ int main(int argc, char** argv) {
     if (!DecodeRgb(raw.rgb_bytes, meta, &rgb)) {
       continue;
     }
-    if (!DecodeDepth(raw.depth_bytes, meta, &depth_m)) {
-      continue;
+    if (use_rgbd) {
+      if (!DecodeDepth(raw.depth_bytes, meta, &depth_m)) {
+        continue;
+      }
     }
 
     if (!slam_initialized) {
@@ -507,12 +567,30 @@ int main(int argc, char** argv) {
       std::cout << "[init] intrinsics fx=" << meta.fx << " fy=" << meta.fy << " cx=" << meta.cx
                 << " cy=" << meta.cy << " size=" << meta.w << "x" << meta.h << "\n";
 
+      ORB_SLAM3::System::eSensor sensor =
+          use_rgbd ? ORB_SLAM3::System::RGBD : ORB_SLAM3::System::MONOCULAR;
       slam = std::make_unique<ORB_SLAM3::System>(
-          options.vocab_path, runtime_settings.string(), ORB_SLAM3::System::RGBD, options.viewer);
+          options.vocab_path, runtime_settings.string(), sensor, options.viewer);
       slam_initialized = true;
     }
 
-    slam->TrackRGBD(rgb, depth_m, meta.ts);
+    if (use_rgbd) {
+      slam->TrackRGBD(rgb, depth_m, meta.ts);
+    } else {
+      slam->TrackMonocular(rgb, meta.ts);
+    }
+
+    const auto tracked_points = slam->GetTrackedMapPoints();
+    for (ORB_SLAM3::MapPoint* mp : tracked_points) {
+      if (mp == nullptr || mp->isBad()) {
+        continue;
+      }
+      const Eigen::Vector3f p = mp->GetWorldPos();
+      if (!std::isfinite(p.x()) || !std::isfinite(p.y()) || !std::isfinite(p.z())) {
+        continue;
+      }
+      map_points_by_id[mp->mnId] = PointXYZ{p.x(), p.y(), p.z()};
+    }
 
     ++frames;
     const double now = MonotonicNowSec();
@@ -528,8 +606,36 @@ int main(int argc, char** argv) {
   if (slam) {
     slam->Shutdown();
     if (!options.trajectory_path.empty()) {
-      slam->SaveTrajectoryTUM(options.trajectory_path);
-      std::cout << "[shutdown] trajectory saved: " << options.trajectory_path << "\n";
+      if (use_rgbd) {
+        const auto parent = std::filesystem::path(options.trajectory_path).parent_path();
+        if (!parent.empty()) {
+          std::filesystem::create_directories(parent);
+        }
+        slam->SaveTrajectoryTUM(options.trajectory_path);
+        std::cout << "[shutdown] trajectory saved: " << options.trajectory_path << "\n";
+      } else {
+        std::cout << "[shutdown] trajectory export skipped for monocular mode "
+                  << "(TUM trajectory requires stereo/RGB-D)\n";
+      }
+    }
+    if (!options.keyframe_trajectory_path.empty()) {
+      const auto parent = std::filesystem::path(options.keyframe_trajectory_path).parent_path();
+      if (!parent.empty()) {
+        std::filesystem::create_directories(parent);
+      }
+      slam->SaveKeyFrameTrajectoryTUM(options.keyframe_trajectory_path);
+      std::cout << "[shutdown] keyframe trajectory saved: " << options.keyframe_trajectory_path << "\n";
+    }
+    if (!options.pointcloud_path.empty() && !map_points_by_id.empty()) {
+      try {
+        SavePointCloudPLY(map_points_by_id, options.pointcloud_path);
+        std::cout << "[shutdown] pointcloud saved: " << options.pointcloud_path
+                  << " points=" << map_points_by_id.size() << "\n";
+      } catch (const std::exception& exc) {
+        std::cerr << "[shutdown] failed to save pointcloud: " << exc.what() << "\n";
+      }
+    } else if (!options.pointcloud_path.empty()) {
+      std::cout << "[shutdown] pointcloud not saved: no tracked map points collected\n";
     }
   }
 

@@ -102,6 +102,10 @@ chmod +x scripts/run_linux_orbslam3.sh scripts/run_linux_xpra_viewer.sh
 ```
 
 Default listener is `tcp://0.0.0.0:5555` on topic `rgbd`.
+On `Ctrl+C`, the Linux bridge now saves:
+- `outputs/trajectory_tum.txt`
+- `outputs/keyframes_tum.txt`
+- `outputs/map_points.ply`
 
 Optional (viewer forwarded to Windows with xpra):
 
@@ -140,8 +144,17 @@ python windows_capture_record3d.py --preview --device-index 0 --depth-units auto
 python windows_stream_zmq.py --endpoint tcp://<linux_tailscale_ip>:5555 --device-index 0 --depth-units auto --source-color-order RGB --jpeg-quality 80 --zstd-level 3
 ```
 
+For better realtime performance, downscale before streaming:
+
+```powershell
+python windows_stream_zmq.py --endpoint tcp://<linux_tailscale_ip>:5555 --device-index 0 --depth-units auto --source-color-order RGB --jpeg-quality 80 --zstd-level 3 --output-width 640 --output-height 480
+```
+
 ### Runtime notes
 
 - If colors look wrong, switch `--source-color-order` between `RGB` and `BGR`.
 - If scale is wrong, explicitly set `--depth-units meters` or `--depth-units millimeters`.
 - First valid frame populates runtime ORB intrinsics from stream metadata.
+- Linux bridge sensor mode can be switched with `SENSOR_MODE`:
+  - RGB-D (default): `SENSOR_MODE=rgbd ./scripts/run_linux_orbslam3.sh`
+  - RGB only (monocular): `SENSOR_MODE=monocular ./scripts/run_linux_orbslam3.sh`

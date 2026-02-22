@@ -65,6 +65,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--timeout-s", type=float, default=1.0, help="Capture frame timeout")
     parser.add_argument("--preview", action="store_true", help="Show outgoing RGB/depth preview")
+    parser.add_argument(
+        "--output-width",
+        type=int,
+        default=0,
+        help="Optional output width for both RGB and depth (0 = keep source)",
+    )
+    parser.add_argument(
+        "--output-height",
+        type=int,
+        default=0,
+        help="Optional output height for both RGB and depth (0 = keep source)",
+    )
     return parser
 
 
@@ -113,6 +125,39 @@ def _build_header(
     }
 
 
+def _resize_rgbd(
+    bgr: np.ndarray,
+    depth_m: np.ndarray,
+    fx: float,
+    fy: float,
+    cx: float,
+    cy: float,
+    out_w: int,
+    out_h: int,
+) -> tuple[np.ndarray, np.ndarray, float, float, float, float]:
+    src_h, src_w = bgr.shape[:2]
+    if out_w <= 0 or out_h <= 0 or (out_w == src_w and out_h == src_h):
+        return bgr, depth_m, fx, fy, cx, cy
+
+    rgb_resized = cv2.resize(bgr, (out_w, out_h), interpolation=cv2.INTER_AREA)
+    depth_resized = cv2.resize(depth_m, (out_w, out_h), interpolation=cv2.INTER_NEAREST)
+
+    sx = float(out_w) / float(src_w)
+    sy = float(out_h) / float(src_h)
+    fx2 = float(fx) * sx
+    fy2 = float(fy) * sy
+    cx2 = float(cx) * sx
+    cy2 = float(cy) * sy
+    return (
+        np.ascontiguousarray(rgb_resized),
+        np.ascontiguousarray(depth_resized.astype(np.float32, copy=False)),
+        fx2,
+        fy2,
+        cx2,
+        cy2,
+    )
+
+
 def main() -> None:
     args = _build_arg_parser().parse_args()
 
@@ -144,6 +189,7 @@ def main() -> None:
     t_log = time.monotonic()
     t_next = t_log
     printed_intrinsics = False
+    printed_resize = False
 
     try:
         while True:
@@ -158,33 +204,51 @@ def main() -> None:
                 continue
 
             bgr = _to_bgr(frame.rgb, frame.color_order)
+
+            i = frame.intrinsics
+            depth_m = np.ascontiguousarray(frame.depth_m.astype(np.float32, copy=False))
+            bgr, depth_m, fx, fy, cx, cy = _resize_rgbd(
+                bgr=bgr,
+                depth_m=depth_m,
+                fx=i.fx,
+                fy=i.fy,
+                cx=i.cx,
+                cy=i.cy,
+                out_w=args.output_width,
+                out_h=args.output_height,
+            )
+            if not printed_resize and args.output_width > 0 and args.output_height > 0:
+                print(
+                    f"[stream] resizing enabled: {i.width}x{i.height} -> "
+                    f"{args.output_width}x{args.output_height}"
+                )
+                printed_resize = True
+
             ok, encoded_rgb = cv2.imencode(".jpg", bgr, encode_params)
             if not ok:
                 print("[stream] warning: RGB JPEG encode failed")
                 continue
 
-            depth_m = np.ascontiguousarray(frame.depth_m.astype(np.float32, copy=False))
             depth_raw = depth_m.tobytes(order="C")
             depth_zstd = compressor.compress(depth_raw)
 
-            i = frame.intrinsics
             if not printed_intrinsics:
                 print(
                     "[stream] intrinsics "
-                    f"w={i.width} h={i.height} fx={i.fx:.3f} fy={i.fy:.3f} "
-                    f"cx={i.cx:.3f} cy={i.cy:.3f}"
+                    f"w={bgr.shape[1]} h={bgr.shape[0]} fx={fx:.3f} fy={fy:.3f} "
+                    f"cx={cx:.3f} cy={cy:.3f}"
                 )
                 printed_intrinsics = True
 
             header = _build_header(
                 seq=frame.seq,
                 ts=frame.timestamp,
-                width=i.width,
-                height=i.height,
-                fx=i.fx,
-                fy=i.fy,
-                cx=i.cx,
-                cy=i.cy,
+                width=bgr.shape[1],
+                height=bgr.shape[0],
+                fx=fx,
+                fy=fy,
+                cx=cx,
+                cy=cy,
                 jpeg_quality=int(np.clip(args.jpeg_quality, 1, 100)),
                 depth_scale=1.0,
                 depth_uncompressed_bytes=len(depth_raw),
