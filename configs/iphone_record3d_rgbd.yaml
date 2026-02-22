@@ -20,7 +20,7 @@ Camera1.k3: 0.0
 
 Camera.width: __WIDTH__
 Camera.height: __HEIGHT__
-Camera.fps: 30.0
+Camera.fps: 30
 
 # 0 = BGR, 1 = RGB
 Camera.RGB: __CAMERA_RGB__
