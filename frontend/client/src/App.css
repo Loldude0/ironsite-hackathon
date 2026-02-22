@@ -1,7 +1,55 @@
-.app-container {
+/* ── Top Navigation ── */
+.app-root {
   display: flex;
+  flex-direction: column;
   height: 100vh;
   width: 100vw;
+}
+
+.top-nav {
+  display: flex;
+  gap: 0;
+  background: #111;
+  border-bottom: 1px solid #2a2a2a;
+  flex-shrink: 0;
+}
+
+.nav-tab {
+  padding: 12px 28px;
+  border: none;
+  background: transparent;
+  color: #666;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+  border-bottom: 2px solid transparent;
+  letter-spacing: 0.3px;
+}
+
+.nav-tab:hover {
+  color: #aaa;
+  background: #1a1a1a;
+}
+
+.nav-tab.active {
+  color: #fff;
+  border-bottom-color: #2563eb;
+  background: #1a1a1a;
+}
+
+/* ── Layout ── */
+.app-container {
+  display: flex;
+  flex: 1;
+  width: 100%;
+  overflow: hidden;
+}
+
+.page-layout {
+  display: flex;
+  width: 100%;
+  height: 100%;
 }
 
 .panel {
@@ -24,7 +72,7 @@
 }
 
 .panel-header {
-  padding: 14px 20px;
+  padding: 10px 20px;
   font-size: 13px;
   font-weight: 600;
   text-transform: uppercase;
@@ -33,6 +81,78 @@
   border-bottom: 1px solid #2a2a2a;
   background: #1a1a1a;
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+/* ── Time Slider (Evolving Environment) ── */
+.time-slider-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 200px;
+}
+
+.time-labels {
+  display: flex;
+  justify-content: space-between;
+  padding: 0 2px;
+}
+
+.time-label {
+  font-size: 11px;
+  color: #555;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: all 0.15s;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.time-label:hover { color: #aaa; }
+
+.time-label.active {
+  color: #2563eb;
+  font-weight: 700;
+}
+
+.time-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  border-radius: 2px;
+  background: #333;
+  outline: none;
+  cursor: pointer;
+}
+
+.time-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #2563eb;
+  border: 2px solid #1a1a1a;
+  cursor: pointer;
+  transition: transform 0.1s;
+}
+
+.time-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.2);
+}
+
+.time-slider::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #2563eb;
+  border: 2px solid #1a1a1a;
+  cursor: pointer;
 }
 
 /* ── Point Cloud Viewer ── */
@@ -156,11 +276,33 @@
   color: #f87171;
 }
 
+.chat-hint {
+  padding: 16px;
+  font-size: 13px;
+  color: #555;
+  line-height: 1.6;
+  text-align: center;
+  margin-top: 40px;
+}
+
+.chat-hint strong {
+  color: #888;
+}
+
+.chat-tag {
+  font-size: 10px;
+  font-weight: 600;
+  color: #2563eb;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
 /* ── Frame Preview ── */
 .frame-preview {
   position: absolute;
   bottom: 20px;
-  right: 20px;
+  left: 20px;
   width: 440px;
   border-radius: 12px;
   overflow: hidden;
@@ -174,6 +316,18 @@
 @keyframes slideIn {
   from { opacity: 0; transform: translateY(16px) scale(0.96); }
   to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.frame-preview-draggable {
+  user-select: none;
+}
+
+.frame-preview-drag-handle {
+  cursor: grab;
+}
+
+.frame-preview-drag-handle:active {
+  cursor: grabbing;
 }
 
 .frame-preview-header {
@@ -224,4 +378,59 @@
   height: auto;
   display: block;
   transform: scaleX(-1);
+}
+
+/* ── Detection Legend ── */
+.detection-legend {
+  position: absolute;
+  top: 56px;
+  left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  z-index: 10;
+}
+
+.detection-legend-empty {
+  padding: 6px 12px;
+  background: rgba(26, 26, 26, 0.85);
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  font-size: 11px;
+  color: #555;
+}
+
+.detection-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: rgba(26, 26, 26, 0.9);
+  border: 1px solid #333;
+  border-radius: 6px;
+  backdrop-filter: blur(8px);
+}
+
+.detection-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.detection-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #e0e0e0;
+}
+
+.detection-conf {
+  font-size: 11px;
+  color: #888;
+}
+
+.detection-dims {
+  font-size: 10px;
+  color: #555;
+  font-family: monospace;
 }

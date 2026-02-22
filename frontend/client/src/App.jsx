@@ -1,28 +1,32 @@
 import { useState } from "react";
 import "./App.css";
-import PointCloudViewer from "./PointCloudViewer";
-import FramePreview from "./FramePreview";
-import Chatbot from "./Chatbot";
+import EvolvingEnvironment from "./EvolvingEnvironment";
+import MultiAgentLocalization from "./MultiAgentLocalization";
+
+const TABS = [
+  { id: "localization", label: "Multi-Agent Localization" },
+  { id: "evolving", label: "Evolving Environment" },
+];
 
 export default function App() {
-  const [selection, setSelection] = useState(null);
+  const [activeTab, setActiveTab] = useState(TABS[0].id);
 
   return (
-    <div className="app-container">
-      <div className="panel panel-left">
-        <div className="panel-header">3D Point Cloud</div>
-        <PointCloudViewer
-          onFrameSelect={setSelection}
-          selectedFrame={selection?.frame}
-        />
-        <FramePreview
-          selection={selection}
-          onClose={() => setSelection(null)}
-        />
-      </div>
-      <div className="panel panel-right">
-        <div className="panel-header">AI Assistant</div>
-        <Chatbot />
+    <div className="app-root">
+      <nav className="top-nav">
+        {TABS.map((tab) => (
+          <button
+            key={tab.id}
+            className={`nav-tab ${activeTab === tab.id ? "active" : ""}`}
+            onClick={() => setActiveTab(tab.id)}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </nav>
+      <div className="app-container">
+        {activeTab === "evolving" && <EvolvingEnvironment />}
+        {activeTab === "localization" && <MultiAgentLocalization />}
       </div>
     </div>
   );

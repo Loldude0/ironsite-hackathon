@@ -1,21 +1,10 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { Canvas, useThree } from "@react-three/fiber";
-import { OrbitControls } from "@react-three/drei";
+import { OrbitControls, Html } from "@react-three/drei";
 import * as THREE from "three";
-import { PLYLoader } from "three/examples/jsm/loaders/PLYLoader.js";
 
 const HIGHLIGHT_RADIUS = 2.5;
 const GOLD = [1.0, 0.84, 0.0];
-
-function parseJsonl(text) {
-  const out = [];
-  for (const line of text.split("\n")) {
-    const raw = line.trim();
-    if (!raw) continue;
-    out.push(JSON.parse(raw));
-  }
-  return out;
-}
 
 function loadTrajectory(text) {
   const points = [];
@@ -23,7 +12,7 @@ function loadTrajectory(text) {
     if (line.startsWith("#") || !line.trim()) continue;
     const p = line.trim().split(/\s+/);
     if (p.length >= 4) {
-      points.push({ ts: parseFloat(p[0]), x: parseFloat(p[1]), y: parseFloat(p[2]), z: parseFloat(p[3]) });
+      points.push({ ts: parseFloat(p[0]), x: -parseFloat(p[1]), y: -parseFloat(p[2]), z: -parseFloat(p[3]) });
     }
   }
   return points;
@@ -46,6 +35,90 @@ function matchFramesToTrajectory(frames, trajPoints) {
   }
 }
 
+function BoundingBox({ obj }) {
+  const { vertices, edges } = obj.bbox;
+  const [r, g, b] = obj.color;
+  const color = new THREE.Color(r, g, b);
+
+  const lineGeo = useMemo(() => {
+    const points = [];
+    for (const [a, b] of edges) {
+      points.push(new THREE.Vector3(...vertices[a]));
+      points.push(new THREE.Vector3(...vertices[b]));
+    }
+    const geo = new THREE.BufferGeometry().setFromPoints(points);
+    return geo;
+  }, [vertices, edges]);
+
+  const fillGeo = useMemo(() => {
+    const v = vertices;
+    const faceIndices = [
+      [0,1,2,3], [4,5,6,7],
+      [0,1,5,4], [2,3,7,6],
+      [0,3,7,4], [1,2,6,5],
+    ];
+    const pos = [];
+    for (const [a, b, c, d] of faceIndices) {
+      pos.push(...v[a], ...v[b], ...v[c]);
+      pos.push(...v[a], ...v[c], ...v[d]);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+    return geo;
+  }, [vertices]);
+
+  return (
+    <group>
+      <lineSegments geometry={lineGeo}>
+        <lineBasicMaterial color={color} linewidth={2} />
+      </lineSegments>
+      <mesh geometry={fillGeo}>
+        <meshBasicMaterial
+          color={color}
+          transparent
+          opacity={0.08}
+          side={THREE.DoubleSide}
+          depthWrite={false}
+        />
+      </mesh>
+      <Html
+        position={obj.center}
+        center
+        style={{ pointerEvents: "none" }}
+      >
+        <div style={{
+          background: `rgba(${Math.round(r*255)}, ${Math.round(g*255)}, ${Math.round(b*255)}, 0.85)`,
+          color: "#fff",
+          padding: "3px 10px",
+          borderRadius: "4px",
+          fontSize: "11px",
+          fontWeight: 600,
+          fontFamily: "Inter, sans-serif",
+          whiteSpace: "nowrap",
+          letterSpacing: "0.3px",
+          boxShadow: "0 2px 8px rgba(0,0,0,0.4)",
+        }}>
+          {obj.label}
+          <span style={{ opacity: 0.7, marginLeft: 6, fontSize: "10px" }}>
+            {(obj.confidence * 100).toFixed(0)}%
+          </span>
+        </div>
+      </Html>
+    </group>
+  );
+}
+
+function DetectionOverlays({ detections }) {
+  if (!detections || detections.length === 0) return null;
+  return (
+    <>
+      {detections.map((obj) => (
+        <BoundingBox key={obj.id} obj={obj} />
+      ))}
+    </>
+  );
+}
+
 function PointCloud({ url, framesIndex, onPointClick, onMapCentroid, selectedFrame }) {
   const pointsRef = useRef();
   const baseColorsRef = useRef(null);
@@ -58,60 +131,47 @@ function PointCloud({ url, framesIndex, onPointClick, onMapCentroid, selectedFra
 
   useEffect(() => {
     fetch(url)
-      .then((r) => {
-        if (!r.ok) {
-          throw new Error(`Failed to load point cloud: ${url} (HTTP ${r.status})`);
-        }
-        return r.arrayBuffer();
-      })
-      .then((arrayBuffer) => {
-        const loader = new PLYLoader();
-        const geo = loader.parse(arrayBuffer);
-        const posAttr = geo.getAttribute("position");
-        if (!posAttr || posAttr.count <= 0) {
-          throw new Error(`Invalid/empty PLY geometry for ${url}`);
+      .then((r) => r.text())
+      .then((text) => {
+        const lines = text.split("\n");
+        let headerEnd = 0;
+        let vertexCount = 0;
+        let hasColor = false;
+
+        for (let i = 0; i < lines.length; i++) {
+          if (lines[i].startsWith("element vertex")) {
+            vertexCount = parseInt(lines[i].split(" ")[2], 10);
+          }
+          if (lines[i].startsWith("property") && lines[i].includes("red")) {
+            hasColor = true;
+          }
+          if (lines[i].trim() === "end_header") {
+            headerEnd = i + 1;
+            break;
+          }
         }
 
-        const vertexCount = posAttr.count;
+        const positions = new Float32Array(vertexCount * 3);
         const colors = new Float32Array(vertexCount * 3);
-        let sx = 0;
-        let sy = 0;
-        let sz = 0;
-        for (let i = 0; i < vertexCount; i++) {
-          const x = posAttr.array[i * posAttr.itemSize];
-          const y = posAttr.array[i * posAttr.itemSize + 1];
-          const z = posAttr.array[i * posAttr.itemSize + 2];
-          if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
-            throw new Error(`PLY vertex contains invalid xyz at row ${i} for ${url}`);
-          }
-          sx += x;
-          sy += y;
-          sz += z;
-        }
+        let sx = 0, sy = 0, sz = 0;
 
-        const rawColorAttr = geo.getAttribute("color");
-        if (rawColorAttr && rawColorAttr.count === vertexCount && rawColorAttr.itemSize >= 3) {
-          let maxColor = 0.0;
-          for (let i = 0; i < vertexCount; i++) {
-            const r = rawColorAttr.array[i * rawColorAttr.itemSize];
-            const g = rawColorAttr.array[i * rawColorAttr.itemSize + 1];
-            const b = rawColorAttr.array[i * rawColorAttr.itemSize + 2];
-            colors[i * 3] = r;
-            colors[i * 3 + 1] = g;
-            colors[i * 3 + 2] = b;
-            maxColor = Math.max(maxColor, r, g, b);
-          }
-          if (maxColor > 1.0) {
-            for (let i = 0; i < colors.length; i++) {
-              colors[i] /= 255.0;
-            }
-          }
-        } else {
-          // Fallback gradient coloring when PLY has no color properties.
-          for (let i = 0; i < vertexCount; i++) {
-            const x = posAttr.array[i * posAttr.itemSize];
-            const y = posAttr.array[i * posAttr.itemSize + 1];
-            const z = posAttr.array[i * posAttr.itemSize + 2];
+        for (let i = 0; i < vertexCount; i++) {
+          const line = lines[headerEnd + i];
+          if (!line || !line.trim()) continue;
+          const parts = line.trim().split(/\s+/);
+          const x = -parseFloat(parts[0]);
+          const y = -parseFloat(parts[1]);
+          const z = -parseFloat(parts[2]);
+          positions[i * 3] = x;
+          positions[i * 3 + 1] = y;
+          positions[i * 3 + 2] = z;
+          sx += x; sy += y; sz += z;
+
+          if (hasColor && parts.length >= 6) {
+            colors[i * 3] = parseInt(parts[3], 10) / 255;
+            colors[i * 3 + 1] = parseInt(parts[4], 10) / 255;
+            colors[i * 3 + 2] = parseInt(parts[5], 10) / 255;
+          } else {
             const norm = Math.sqrt(x * x + y * y + z * z);
             const t = Math.min(norm / 30, 1);
             colors[i * 3] = 0.2 + t * 0.5;
@@ -119,26 +179,22 @@ function PointCloud({ url, framesIndex, onPointClick, onMapCentroid, selectedFra
             colors[i * 3 + 2] = 0.9 - t * 0.4;
           }
         }
-        geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
 
         const centroid = [sx / vertexCount, sy / vertexCount, sz / vertexCount];
         onMapCentroid(centroid);
+
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+        geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
         geo.computeBoundingSphere();
 
         baseColorsRef.current = new Float32Array(colors);
         setGeometry(geo);
 
         if (geo.boundingSphere) {
-          const c = geo.boundingSphere.center;
-          const r = geo.boundingSphere.radius;
-          if (Number.isFinite(c.x) && Number.isFinite(c.y) && Number.isFinite(c.z) && Number.isFinite(r)) {
-            camera.position.set(c.x + r, c.y + r, c.z + r);
-            camera.lookAt(c.x, c.y, c.z);
-          }
+          camera.position.set(14.04, 8.42, 7.98);
+          camera.lookAt(10.19, 6.11, 5.79);
         }
-      })
-      .catch((err) => {
-        console.error("[PointCloudViewer] point cloud load failed:", err);
       });
   }, [url, camera, onMapCentroid]);
 
@@ -240,58 +296,47 @@ function CameraMarkers({ frames }) {
   );
 }
 
-export default function PointCloudViewer({ onFrameSelect, selectedFrame }) {
+export default function PointCloudViewer({ scene, onFrameSelect, selectedFrame }) {
   const [framesIndex, setFramesIndex] = useState([]);
   const [mapCentroid, setMapCentroid] = useState(null);
   const [aligned, setAligned] = useState(false);
-  const [usingPrecomputedWorld, setUsingPrecomputedWorld] = useState(false);
+  const [detections, setDetections] = useState([]);
 
   useEffect(() => {
-    const run = async () => {
-      // Preferred path for manually-merged/demo scenes:
-      // precomputed world positions and image URLs.
-      try {
-        const worldResp = await fetch("/frames/frames_world.jsonl", { cache: "no-store" });
-        if (worldResp.ok) {
-          const worldText = await worldResp.text();
-          const framesWorld = parseJsonl(worldText);
-          if (framesWorld.length > 0 && framesWorld.some((f) => Array.isArray(f.worldPos))) {
-            setFramesIndex(framesWorld);
-            setUsingPrecomputedWorld(true);
-            setAligned(true);
-            return;
-          }
-        }
-      } catch {
-        // Fall through to legacy path.
-      }
+    Promise.all([
+      fetch(`/scenes/${scene}/frames/samples_index.jsonl`).then((r) => r.text()),
+      fetch(`/scenes/${scene}/trajectory_tum.txt`).then((r) => r.text()),
+      fetch("/scenes/detections.json").then((r) => r.json()),
+    ]).then(([samplesText, trajText, detectionsData]) => {
+      const frames = samplesText
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
 
-      const [samplesText, trajText] = await Promise.all([
-        fetch("/frames/samples_index.jsonl").then((r) => r.text()),
-        fetch("/trajectory_tum.txt").then((r) => r.text()),
-      ]);
-
-      const frames = parseJsonl(samplesText);
       const trajPoints = loadTrajectory(trajText);
       matchFramesToTrajectory(frames, trajPoints);
-      setFramesIndex(frames);
-      setUsingPrecomputedWorld(false);
-    };
 
-    run();
-  }, []);
+      setFramesIndex(frames);
+      setAligned(false);
+      setMapCentroid(null);
+
+      const sceneDetections = detectionsData.scenes[scene]?.objects || [];
+      setDetections(sceneDetections);
+    });
+  }, [scene]);
 
   useEffect(() => {
-    if (!mapCentroid || framesIndex.length === 0 || aligned || usingPrecomputedWorld) return;
+    if (!mapCentroid || framesIndex.length === 0 || aligned) return;
 
-    let sx = 0, sy = 0, sz = 0;
+    let sx = 0, sy = 0, sz = 0, n = 0;
     for (const f of framesIndex) {
       if (!f.worldPos) continue;
       sx += f.worldPos[0];
       sy += f.worldPos[1];
       sz += f.worldPos[2];
+      n++;
     }
-    const n = framesIndex.length;
+    if (n === 0) return;
     const camCentroid = [sx / n, sy / n, sz / n];
 
     const offset = [
@@ -311,7 +356,7 @@ export default function PointCloudViewer({ onFrameSelect, selectedFrame }) {
 
     setFramesIndex([...framesIndex]);
     setAligned(true);
-  }, [mapCentroid, framesIndex, aligned, usingPrecomputedWorld]);
+  }, [mapCentroid, framesIndex, aligned]);
 
   const handleMapCentroid = useCallback((centroid) => {
     setMapCentroid(centroid);
@@ -325,15 +370,16 @@ export default function PointCloudViewer({ onFrameSelect, selectedFrame }) {
     >
       <ambientLight intensity={0.5} />
       <PointCloud
-        url="/map_points.ply"
+        url={`/scenes/${scene}/map_points.ply`}
         framesIndex={framesIndex}
         onPointClick={onFrameSelect}
         onMapCentroid={handleMapCentroid}
         selectedFrame={selectedFrame}
       />
+      <DetectionOverlays detections={detections} />
       <CameraMarkers frames={framesIndex} />
       <OrbitControls enableDamping dampingFactor={0.1} rotateSpeed={0.8} />
-      <gridHelper args={[50, 50, "#222", "#1a1a1a"]} />
+      <gridHelper args={[50, 50, "#222", "#1a1a1a"]} position={[-15, 0, 0]} />
     </Canvas>
   );
 }
