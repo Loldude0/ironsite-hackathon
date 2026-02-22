@@ -217,3 +217,5 @@ __marimo__/
 
 *.pt
 assets/*frontend/outputsoppositecorridor.zip
+
+tmp/

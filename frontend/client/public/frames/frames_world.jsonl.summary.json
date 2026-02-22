@@ -1,0 +1,40 @@
+{
+  "manifest": "tmp/sessions_manifest.json",
+  "output_jsonl": "frontend/client/public/frames/frames_world.jsonl",
+  "output_trajectory": null,
+  "tracking_only": true,
+  "max_match_dt_s": 0.06,
+  "records_total": 147,
+  "records_written": 146,
+  "records_skipped": 1,
+  "copied_images": 146,
+  "sessions": [
+    {
+      "name": "s1",
+      "samples_index": "/home/atajne/Projects/ironsite-hackathon/tmp/outputsnochair/frame_samples/run_20260222_033508_pid133455/samples_index.jsonl",
+      "trajectory_tum": "/home/atajne/Projects/ironsite-hackathon/tmp/outputsnochair/trajectory_tum.txt",
+      "written": 34,
+      "skipped": 1,
+      "max_match_dt_s": 0.0,
+      "avg_match_dt_s": 0.0
+    },
+    {
+      "name": "s2",
+      "samples_index": "/home/atajne/Projects/ironsite-hackathon/tmp/outputselevator/frame_samples/run_20260222_035207_pid137678/samples_index.jsonl",
+      "trajectory_tum": "/home/atajne/Projects/ironsite-hackathon/tmp/outputselevator/trajectory_tum.txt",
+      "written": 53,
+      "skipped": 0,
+      "max_match_dt_s": 0.0,
+      "avg_match_dt_s": 0.0
+    },
+    {
+      "name": "s3",
+      "samples_index": "/home/atajne/Projects/ironsite-hackathon/tmp/outputsoppositecorridor/frame_samples/run_20260222_035733_pid138994/samples_index.jsonl",
+      "trajectory_tum": "/home/atajne/Projects/ironsite-hackathon/tmp/outputsoppositecorridor/trajectory_tum.txt",
+      "written": 59,
+      "skipped": 0,
+      "max_match_dt_s": 0.0,
+      "avg_match_dt_s": 0.0
+    }
+  ]
+}

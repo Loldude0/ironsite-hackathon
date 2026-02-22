@@ -220,6 +220,55 @@ Notes:
 - For yaw input, it supports `--global-yaw-rad`, `--global-yaw-deg`, `--global-yaw-q-xyzw`, or `--global-yaw-q-wxyz`.
 - If your streamed ORB pose behaves like `Tcw` (world->camera), try `--invert-local-pose`.
 
+### Demo Recovery: manual Blender alignment -> clickable frame mapping
+
+If you no longer have `T_G_Lw` calibration matrices but manually aligned multiple session point clouds in Blender:
+
+1. Export Blender object world matrices (one object per session) to JSON:
+```python
+import bpy, json
+out = {}
+for obj in bpy.context.selected_objects:
+    out[obj.name] = [list(row) for row in obj.matrix_world]
+with open("/tmp/blender_transforms.json", "w") as f:
+    json.dump(out, f, indent=2)
+```
+
+2. Create a manifest:
+```json
+{
+  "sessions": [
+    {
+      "name": "session_a",
+      "samples_index": "path/to/session_a/samples_index.jsonl",
+      "trajectory_tum": "path/to/session_a/trajectory_tum.txt",
+      "blender_object": "SessionAObject"
+    },
+    {
+      "name": "session_b",
+      "samples_index": "path/to/session_b/samples_index.jsonl",
+      "trajectory_tum": "path/to/session_b/trajectory_tum.txt",
+      "blender_object": "SessionBObject"
+    }
+  ]
+}
+```
+
+3. Build frontend frame world positions (and optionally copy images):
+```bash
+python scripts/build_frontend_frames_world.py \
+  --manifest /tmp/sessions_manifest.json \
+  --blender-transforms /tmp/blender_transforms.json \
+  --output-jsonl frontend/client/public/frames/frames_world.jsonl \
+  --output-trajectory frontend/client/public/trajectory_world_tum.txt \
+  --copy-images-to frontend/client/public/frames \
+  --image-url-prefix /frames \
+  --tracking-only
+```
+
+The frontend now auto-loads `/frames/frames_world.jsonl` first (if present) and uses each frame’s `worldPos` + `image_url` directly.
+This bypasses centroid-shift heuristics and keeps click-to-frame aligned with your manually merged map.
+
 ### Linux startup (fusion + ORB bridge pose stream)
 
 1. Install Python deps:
