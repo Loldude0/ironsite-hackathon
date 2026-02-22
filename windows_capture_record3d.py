@@ -50,6 +50,12 @@ def _call_first(obj: Any, names: Iterable[str]) -> Any:
             try:
                 return attr()
             except TypeError:
+                # Some pybind methods require a simple mode flag. Try common values.
+                for args in ((0,), (False,), (1,), (True,)):
+                    try:
+                        return attr(*args)
+                    except TypeError:
+                        continue
                 continue
         return attr
     return None
@@ -99,6 +105,8 @@ class Record3DCapture:
         self._use_poll_fallback = False
         self._fallback_notice_printed = False
         self._poll_interval_s = 1.0 / 60.0
+        self._cached_intrinsics: Intrinsics | None = None
+        self._intrinsics_warning_printed = False
 
     @staticmethod
     def _load_record3d() -> tuple[Any, Any, list[Any]]:
@@ -215,30 +223,56 @@ class Record3DCapture:
         self._device_type = None
         self._use_poll_fallback = False
         self._fallback_notice_printed = False
+        self._cached_intrinsics = None
+        self._intrinsics_warning_printed = False
         self._new_frame_event.clear()
+
+    @staticmethod
+    def _as_float_maybe(value: Any) -> float | None:
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _read_numeric_field(obj: Any, *names: str) -> float | None:
+        for name in names:
+            attr = getattr(obj, name, None)
+            if attr is None:
+                continue
+            if callable(attr):
+                try:
+                    value = attr()
+                except TypeError:
+                    continue
+            else:
+                value = attr
+            parsed = Record3DCapture._as_float_maybe(value)
+            if parsed is not None:
+                return parsed
+        return None
 
     @staticmethod
     def _intrinsics_from_coeffs(coeffs: Any, width: int, height: int) -> Intrinsics | None:
         if coeffs is None:
             return None
 
-        def _as_float(value: Any) -> float | None:
-            try:
-                return float(value)
-            except Exception:
-                return None
-
         fx = fy = cx = cy = None
         if isinstance(coeffs, dict):
-            fx = _as_float(coeffs.get("fx"))
-            fy = _as_float(coeffs.get("fy"))
-            cx = _as_float(coeffs.get("tx", coeffs.get("cx")))
-            cy = _as_float(coeffs.get("ty", coeffs.get("cy")))
+            fx = Record3DCapture._as_float_maybe(coeffs.get("fx"))
+            fy = Record3DCapture._as_float_maybe(coeffs.get("fy"))
+            cx = Record3DCapture._as_float_maybe(coeffs.get("tx", coeffs.get("cx")))
+            cy = Record3DCapture._as_float_maybe(coeffs.get("ty", coeffs.get("cy")))
+        elif isinstance(coeffs, (tuple, list)) and len(coeffs) >= 4:
+            fx = Record3DCapture._as_float_maybe(coeffs[0])
+            fy = Record3DCapture._as_float_maybe(coeffs[1])
+            cx = Record3DCapture._as_float_maybe(coeffs[2])
+            cy = Record3DCapture._as_float_maybe(coeffs[3])
         else:
-            fx = _as_float(getattr(coeffs, "fx", None))
-            fy = _as_float(getattr(coeffs, "fy", None))
-            cx = _as_float(getattr(coeffs, "tx", getattr(coeffs, "cx", None)))
-            cy = _as_float(getattr(coeffs, "ty", getattr(coeffs, "cy", None)))
+            fx = Record3DCapture._read_numeric_field(coeffs, "fx")
+            fy = Record3DCapture._read_numeric_field(coeffs, "fy")
+            cx = Record3DCapture._read_numeric_field(coeffs, "tx", "cx")
+            cy = Record3DCapture._read_numeric_field(coeffs, "ty", "cy")
 
         if fx is None or fy is None or cx is None or cy is None:
             return None
@@ -254,6 +288,8 @@ class Record3DCapture:
             mat = np.asarray(matrix, dtype=np.float64)
         except Exception:
             return None
+        if mat.shape == (9,):
+            mat = mat.reshape(3, 3)
         if mat.shape != (3, 3):
             return None
         fx = float(mat[0, 0])
@@ -264,22 +300,64 @@ class Record3DCapture:
             return None
         return Intrinsics(width=width, height=height, fx=fx, fy=fy, cx=cx, cy=cy)
 
-    def _extract_intrinsics(self, frame: Any, width: int, height: int) -> Intrinsics:
+    def _extract_intrinsics(self, frame: Any, width: int, height: int) -> Intrinsics | None:
         candidates: list[Any] = []
+        candidate_sources: list[str] = []
+        method_names = (
+            "get_intrinsic_mat",
+            "get_intrinsics_mat",
+            "get_intrinsics",
+            "get_intrinsic_coeffs",
+            "get_camera_intrinsics",
+        )
         if frame is not None:
-            candidates.append(_call_first(frame, ("get_intrinsic_mat", "get_intrinsics_mat", "get_intrinsics")))
+            for name in method_names:
+                value = _call_first(frame, (name,))
+                if value is not None:
+                    candidates.append(value)
+                    candidate_sources.append(f"frame.{name}")
+            for name in ("intrinsic_mat", "intrinsics"):
+                value = getattr(frame, name, None)
+                if value is not None:
+                    candidates.append(value)
+                    candidate_sources.append(f"frame.{name}")
         if self._stream is not None:
-            candidates.append(_call_first(self._stream, ("get_intrinsic_mat", "get_intrinsics_mat", "get_intrinsics")))
+            for name in method_names:
+                value = _call_first(self._stream, (name,))
+                if value is not None:
+                    candidates.append(value)
+                    candidate_sources.append(f"stream.{name}")
+            for name in ("intrinsic_mat", "intrinsics"):
+                value = getattr(self._stream, name, None)
+                if value is not None:
+                    candidates.append(value)
+                    candidate_sources.append(f"stream.{name}")
 
-        for candidate in candidates:
+        for idx, candidate in enumerate(candidates):
             intr = self._intrinsics_from_matrix(candidate, width=width, height=height)
             if intr is not None:
+                self._cached_intrinsics = intr
                 return intr
             intr = self._intrinsics_from_coeffs(candidate, width=width, height=height)
             if intr is not None:
+                self._cached_intrinsics = intr
                 return intr
 
-        raise RuntimeError("Record3D intrinsics not available in frame metadata")
+        if self._cached_intrinsics is not None:
+            return self._cached_intrinsics
+
+        if not self._intrinsics_warning_printed:
+            desc: list[str] = []
+            for idx, candidate in enumerate(candidates):
+                source = candidate_sources[idx] if idx < len(candidate_sources) else f"candidate[{idx}]"
+                desc.append(f"{source}:{type(candidate).__name__}")
+            stream_type = type(self._stream).__name__ if self._stream is not None else "None"
+            print(
+                "[capture] intrinsics unavailable yet; waiting for metadata. "
+                f"stream_type={stream_type} candidates={desc}"
+            )
+            self._intrinsics_warning_printed = True
+        return None
 
     def _extract_rgb(self, frame: Any) -> np.ndarray:
         rgb_raw = None
@@ -385,6 +463,8 @@ class Record3DCapture:
                 f"Depth/RGB shape mismatch. RGB={rgb.shape[:2]} depth={depth_m.shape[:2]}"
             )
         intrinsics = self._extract_intrinsics(frame, width=rgb.shape[1], height=rgb.shape[0])
+        if intrinsics is None:
+            return None
         ts = self._extract_timestamp(frame)
         seq = self._seq
         self._seq += 1
