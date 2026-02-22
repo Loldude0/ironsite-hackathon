@@ -20,6 +20,10 @@ SENSOR_MODE="${SENSOR_MODE:-rgbd}"   # rgbd | monocular
 TRAJECTORY_PATH="${TRAJECTORY_PATH:-${REPO_ROOT}/outputs/trajectory_tum.txt}"
 KEYFRAME_TRAJECTORY_PATH="${KEYFRAME_TRAJECTORY_PATH:-${REPO_ROOT}/outputs/keyframes_tum.txt}"
 POINTCLOUD_PATH="${POINTCLOUD_PATH:-${REPO_ROOT}/outputs/map_points.ply}"
+POSE_STREAM_ENDPOINT="${POSE_STREAM_ENDPOINT:-}"
+NODE_ID="${NODE_ID:-worker_node}"
+SESSION_ID="${SESSION_ID:-session_default}"
+POSE_STREAM_RATE_HZ="${POSE_STREAM_RATE_HZ:-15}"
 
 if [[ "${ENABLE_VIEWER}" == "1" && -z "${DISPLAY:-}" ]]; then
   echo "[run] no DISPLAY detected; disabling Pangolin viewer (set ENABLE_VIEWER=1 once X11/xpra is available)"
@@ -118,6 +122,12 @@ fi
 if [[ -n "${POINTCLOUD_PATH}" ]]; then
   CMD+=(--pointcloud "${POINTCLOUD_PATH}")
 fi
+if [[ -n "${POSE_STREAM_ENDPOINT}" ]]; then
+  CMD+=(--pose-stream-endpoint "${POSE_STREAM_ENDPOINT}")
+  CMD+=(--node-id "${NODE_ID}")
+  CMD+=(--session-id "${SESSION_ID}")
+  CMD+=(--pose-stream-rate-hz "${POSE_STREAM_RATE_HZ}")
+fi
 
 if [[ $# -gt 0 ]]; then
   CMD+=("$@")
@@ -125,4 +135,7 @@ fi
 
 echo "[run] starting ORB bridge"
 echo "[run] endpoint=${ZMQ_ENDPOINT} topic=${ZMQ_TOPIC} bind=${ZMQ_BIND} viewer=${ENABLE_VIEWER} sensor=${SENSOR_MODE}"
+if [[ -n "${POSE_STREAM_ENDPOINT}" ]]; then
+  echo "[run] pose_stream=${POSE_STREAM_ENDPOINT} node_id=${NODE_ID} session_id=${SESSION_ID} rate_hz=${POSE_STREAM_RATE_HZ}"
+fi
 exec "${CMD[@]}"

@@ -1,0 +1,21 @@
+http_host: "0.0.0.0"
+http_port: 8080
+
+slam_pose_udp_host: "0.0.0.0"
+slam_pose_udp_port: 8091
+
+# Optional, format "host:port". Empty disables rebroadcast.
+global_pose_udp_endpoint: ""
+
+output_root: "outputs/fusion"
+min_initial_xy_distance_m: 0.15
+
+solver:
+  max_skew_ms: 100
+  min_pairs: 25
+  min_motion_spread_m: 0.4
+  min_second_singular: 0.02
+  outlier_mad_scale: 2.5
+  outlier_min_m: 0.12
+  min_inliers: 15
+  min_inlier_ratio: 0.6

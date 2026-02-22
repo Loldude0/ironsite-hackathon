@@ -164,3 +164,60 @@ python windows_stream_zmq.py --endpoint tcp://<linux_tailscale_ip>:5555 --device
 - Linux bridge sensor mode can be switched with `SENSOR_MODE`:
   - RGB-D (default): `SENSOR_MODE=rgbd ./scripts/run_linux_orbslam3.sh`
   - RGB only (monocular): `SENSOR_MODE=monocular ./scripts/run_linux_orbslam3.sh`
+
+## UWB-Initialized Global Frame (Anchor + Worker v1)
+
+This repo now includes a fusion service that estimates a fixed `T_G_Lw` from:
+- anchor-side UWB samples from the iOS app (`IronsiteAIHack`)
+- worker local SLAM poses streamed from `linux_orbslam3_rgbd_stream.cpp`
+
+Supported modes:
+- `paired_6dof`: UWB + SLAM paired within calibration window
+- `initial_xyzyaw` (current app default): UWB-only 5s bootstrap, then lock `T_G_Lw` on first ORB pose using `x,y,z + yaw`
+
+Outputs are written under `outputs/fusion/<session_id>/`:
+- `calibration_result.json`
+- `matched_samples.jsonl`
+- `trajectory_global_tum.txt`
+
+### Linux startup (fusion + ORB bridge pose stream)
+
+1. Install Python deps:
+```bash
+pip install -r requirements.txt
+```
+
+2. Start fusion service:
+```bash
+cd /home/atajne/Projects/ironsite-hackathon
+./scripts/run_fusion_server.sh
+```
+
+3. Start ORB bridge with additive live pose output:
+```bash
+cd /home/atajne/Projects/ironsite-hackathon
+SESSION_ID="$(date -u +%Y-%m-%dT%H-%M-%SZ)"
+POSE_STREAM_ENDPOINT=udp://127.0.0.1:8091 \
+NODE_ID=worker_phone \
+SESSION_ID="${SESSION_ID}" \
+./scripts/run_linux_orbslam3.sh
+```
+
+Use the exact same session id in the iOS app `Session ID` field before pressing `Calibrate (5s)`.
+
+### iOS app (`IronsiteAIHack`) flow
+
+1. Set Fusion URL in the app UI: `http://<linux_tailscale_ip>:8080`
+2. Set `Session ID` to match ORB `--session-id` / `SESSION_ID`.
+3. On anchor phone, tap `Anchor (Host)`.
+4. On worker phone, tap `Worker (Browse)`.
+5. Tap `Calibrate (5s)` on anchor and move devices for ~5s.
+6. In this mode, calibration enters `waiting_for_first_slam_pose` after UWB bootstrap is ready.
+7. You can now switch worker phone to Record3D and start streaming; fusion finalizes on the first ORB pose.
+8. Watch calibration state/countdown/matched pairs/inliers/confidence in the app.
+
+The ORB tracking path is unchanged; live pose stream is additive via:
+- `--pose-stream-endpoint`
+- `--node-id`
+- `--session-id`
+- `--pose-stream-rate-hz`

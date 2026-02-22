@@ -7,3 +7,4 @@ opencv-python
 rosbags
 pyzmq
 zstandard
+pyyaml

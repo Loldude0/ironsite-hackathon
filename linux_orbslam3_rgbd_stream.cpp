@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <cmath>
 #include <ctime>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -28,6 +29,9 @@
 #include <unordered_map>
 #include <vector>
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 namespace {
@@ -55,6 +59,10 @@ struct Options {
   std::string keyframe_trajectory_path;
   std::string pointcloud_path;
   std::string sensor_mode = "rgbd";  // rgbd | monocular
+  std::string pose_stream_endpoint;
+  std::string node_id = "worker_node";
+  std::string session_id = "session_default";
+  double pose_stream_rate_hz = 15.0;
 };
 
 struct FrameMeta {
@@ -91,6 +99,10 @@ void PrintUsage(const char* prog) {
       << "  --rcv-hwm <int>                  Default: 2\n"
       << "  --poll-timeout-ms <int>          Default: 100\n"
       << "  --sensor-mode <rgbd|monocular>   Default: rgbd\n"
+      << "  --pose-stream-endpoint <udp://host:port|ws://...>  Optional\n"
+      << "  --node-id <worker_id>            Default: worker_node\n"
+      << "  --session-id <session_id>        Default: session_default\n"
+      << "  --pose-stream-rate-hz <double>   Default: 15.0\n"
       << "  --trajectory <path.txt>          Save TUM trajectory on shutdown\n"
       << "  --keyframe-trajectory <path.txt> Save TUM keyframe trajectory on shutdown\n"
       << "  --pointcloud <path.ply>          Save tracked map points as PLY on shutdown\n";
@@ -116,6 +128,19 @@ bool ParseArgs(int argc, char** argv, Options* options) {
         *out = std::stoi(argv[++i]);
       } catch (...) {
         std::cerr << "Invalid integer for " << flag << "\n";
+        return false;
+      }
+      return true;
+    };
+    auto need_double = [&](const std::string& flag, double* out) -> bool {
+      if (i + 1 >= argc) {
+        std::cerr << "Missing value for " << flag << "\n";
+        return false;
+      }
+      try {
+        *out = std::stod(argv[++i]);
+      } catch (...) {
+        std::cerr << "Invalid floating-point value for " << flag << "\n";
         return false;
       }
       return true;
@@ -155,6 +180,22 @@ bool ParseArgs(int argc, char** argv, Options* options) {
       if (!need_value(arg, &options->sensor_mode)) {
         return false;
       }
+    } else if (arg == "--pose-stream-endpoint") {
+      if (!need_value(arg, &options->pose_stream_endpoint)) {
+        return false;
+      }
+    } else if (arg == "--node-id") {
+      if (!need_value(arg, &options->node_id)) {
+        return false;
+      }
+    } else if (arg == "--session-id") {
+      if (!need_value(arg, &options->session_id)) {
+        return false;
+      }
+    } else if (arg == "--pose-stream-rate-hz") {
+      if (!need_double(arg, &options->pose_stream_rate_hz)) {
+        return false;
+      }
     } else if (arg == "--rcv-hwm") {
       if (!need_int(arg, &options->rcv_hwm)) {
         return false;
@@ -179,6 +220,10 @@ bool ParseArgs(int argc, char** argv, Options* options) {
   }
   if (options->sensor_mode != "rgbd" && options->sensor_mode != "monocular") {
     std::cerr << "--sensor-mode must be rgbd or monocular\n";
+    return false;
+  }
+  if (options->pose_stream_rate_hz <= 0.0) {
+    std::cerr << "--pose-stream-rate-hz must be > 0\n";
     return false;
   }
   return true;
@@ -556,6 +601,63 @@ void SavePointCloudPLY(const std::vector<PointXYZ>& points, const std::filesyste
   }
 }
 
+struct UdpPoseStream {
+  int sock_fd = -1;
+  sockaddr_in addr {};
+};
+
+bool ParseUdpEndpoint(const std::string& endpoint, UdpPoseStream* out) {
+  constexpr const char* kUdpPrefix = "udp://";
+  if (endpoint.rfind(kUdpPrefix, 0) != 0) {
+    return false;
+  }
+  const std::string host_port = endpoint.substr(std::strlen(kUdpPrefix));
+  const auto colon = host_port.rfind(':');
+  if (colon == std::string::npos) {
+    std::cerr << "[pose-stream] invalid endpoint (missing port): " << endpoint << "\n";
+    return false;
+  }
+  const std::string host = host_port.substr(0, colon);
+  const std::string port_str = host_port.substr(colon + 1);
+  int port = 0;
+  try {
+    port = std::stoi(port_str);
+  } catch (...) {
+    std::cerr << "[pose-stream] invalid port in endpoint: " << endpoint << "\n";
+    return false;
+  }
+  if (port <= 0 || port > 65535) {
+    std::cerr << "[pose-stream] port out of range in endpoint: " << endpoint << "\n";
+    return false;
+  }
+
+  const int sock_fd = socket(AF_INET, SOCK_DGRAM, 0);
+  if (sock_fd < 0) {
+    std::cerr << "[pose-stream] failed to create UDP socket\n";
+    return false;
+  }
+
+  sockaddr_in addr {};
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(static_cast<uint16_t>(port));
+  if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
+    std::cerr << "[pose-stream] invalid IPv4 host in endpoint: " << endpoint << "\n";
+    close(sock_fd);
+    return false;
+  }
+
+  out->sock_fd = sock_fd;
+  out->addr = addr;
+  return true;
+}
+
+void ClosePoseStream(UdpPoseStream* stream) {
+  if (stream->sock_fd >= 0) {
+    close(stream->sock_fd);
+    stream->sock_fd = -1;
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -614,6 +716,28 @@ int main(int argc, char** argv) {
   bool slam_initialized = false;
   std::unordered_map<unsigned long, PointSample> map_points_by_id;
   const bool use_rgbd = options.sensor_mode == "rgbd";
+  const bool pose_stream_enabled = !options.pose_stream_endpoint.empty();
+  UdpPoseStream pose_stream;
+  bool pose_stream_ready = false;
+  double last_pose_emit_sec = 0.0;
+  const double pose_emit_interval = 1.0 / options.pose_stream_rate_hz;
+
+  if (pose_stream_enabled) {
+    if (options.pose_stream_endpoint.rfind("ws://", 0) == 0 ||
+        options.pose_stream_endpoint.rfind("wss://", 0) == 0) {
+      std::cerr << "[pose-stream] WebSocket endpoints are not supported in this build. "
+                   "Use udp://host:port\n";
+    } else {
+      pose_stream_ready = ParseUdpEndpoint(options.pose_stream_endpoint, &pose_stream);
+      if (pose_stream_ready) {
+        std::cout << "[pose-stream] enabled endpoint=" << options.pose_stream_endpoint
+                  << " node_id=" << options.node_id << " session_id=" << options.session_id
+                  << " rate_hz=" << options.pose_stream_rate_hz << "\n";
+      } else {
+        std::cerr << "[pose-stream] disabled due to endpoint parse failure\n";
+      }
+    }
+  }
 
   std::size_t frames = 0;
   double t_log = MonotonicNowSec();
@@ -658,10 +782,54 @@ int main(int argc, char** argv) {
       slam_initialized = true;
     }
 
+    Sophus::SE3f T_Lw_Cw;
     if (use_rgbd) {
-      slam->TrackRGBD(rgb, depth_m, meta.ts);
+      T_Lw_Cw = slam->TrackRGBD(rgb, depth_m, meta.ts);
     } else {
-      slam->TrackMonocular(rgb, meta.ts);
+      T_Lw_Cw = slam->TrackMonocular(rgb, meta.ts);
+    }
+
+    if (pose_stream_ready) {
+      const double now = MonotonicNowSec();
+      if ((now - last_pose_emit_sec) >= pose_emit_interval) {
+        const Eigen::Vector3f t = T_Lw_Cw.translation();
+        const Eigen::Quaternionf q = T_Lw_Cw.unit_quaternion();
+
+        Json::Value root;
+        root["type"] = "slam_pose";
+        root["session_id"] = options.session_id;
+        root["node_id"] = options.node_id;
+        root["ts_ms"] = static_cast<Json::Int64>(std::llround(meta.ts * 1000.0));
+        root["tracking_state"] = slam->GetTrackingState();
+
+        Json::Value t_xyz(Json::arrayValue);
+        t_xyz.append(t.x());
+        t_xyz.append(t.y());
+        t_xyz.append(t.z());
+        root["t_xyz_m"] = t_xyz;
+
+        Json::Value q_xyzw(Json::arrayValue);
+        q_xyzw.append(q.x());
+        q_xyzw.append(q.y());
+        q_xyzw.append(q.z());
+        q_xyzw.append(q.w());
+        root["q_xyzw"] = q_xyzw;
+
+        Json::StreamWriterBuilder builder;
+        builder["indentation"] = "";
+        const std::string payload = Json::writeString(builder, root);
+        const ssize_t sent = sendto(
+            pose_stream.sock_fd,
+            payload.data(),
+            payload.size(),
+            0,
+            reinterpret_cast<const sockaddr*>(&pose_stream.addr),
+            sizeof(pose_stream.addr));
+        if (sent < 0) {
+          std::cerr << "[pose-stream] sendto failed\n";
+        }
+        last_pose_emit_sec = now;
+      }
     }
 
     const auto tracked_points = slam->GetTrackedMapPoints();
@@ -738,6 +906,7 @@ int main(int argc, char** argv) {
 
   zmq_close(sub);
   zmq_ctx_term(zmq_ctx);
+  ClosePoseStream(&pose_stream);
   std::cout << "[shutdown] done\n";
   return 0;
 }
