@@ -8,6 +8,7 @@ to a Windows machine and used by `windows_stream_zmq.py`.
 from __future__ import annotations
 
 import argparse
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -107,6 +108,7 @@ class Record3DCapture:
         self._poll_interval_s = 1.0 / 60.0
         self._cached_intrinsics: Intrinsics | None = None
         self._intrinsics_warning_printed = False
+        self._shape_fix_warning_printed = False
 
     @staticmethod
     def _load_record3d() -> tuple[Any, Any, list[Any]]:
@@ -225,6 +227,7 @@ class Record3DCapture:
         self._fallback_notice_printed = False
         self._cached_intrinsics = None
         self._intrinsics_warning_printed = False
+        self._shape_fix_warning_printed = False
         self._new_frame_event.clear()
 
     @staticmethod
@@ -273,6 +276,33 @@ class Record3DCapture:
             fy = Record3DCapture._read_numeric_field(coeffs, "fy")
             cx = Record3DCapture._read_numeric_field(coeffs, "tx", "cx")
             cy = Record3DCapture._read_numeric_field(coeffs, "ty", "cy")
+
+            # Some bindings expose coeffs as a numeric iterable.
+            if (fx is None or fy is None or cx is None or cy is None) and hasattr(coeffs, "__iter__"):
+                try:
+                    arr = np.asarray(list(coeffs), dtype=np.float64).reshape(-1)
+                    if arr.size >= 4:
+                        fx = fx if fx is not None else float(arr[0])
+                        fy = fy if fy is not None else float(arr[1])
+                        cx = cx if cx is not None else float(arr[2])
+                        cy = cy if cy is not None else float(arr[3])
+                except Exception:
+                    pass
+
+            # Last-resort parsing from repr/str, e.g. "fx=... fy=... tx=... ty=...".
+            if fx is None or fy is None or cx is None or cy is None:
+                text = f"{coeffs!r} {coeffs}"
+                matches = dict(
+                    (k.lower(), float(v))
+                    for k, v in re.findall(
+                        r"(fx|fy|tx|ty|cx|cy)\s*[:=]\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)",
+                        text,
+                    )
+                )
+                fx = fx if fx is not None else matches.get("fx")
+                fy = fy if fy is not None else matches.get("fy")
+                cx = cx if cx is not None else matches.get("tx", matches.get("cx"))
+                cy = cy if cy is not None else matches.get("ty", matches.get("cy"))
 
         if fx is None or fy is None or cx is None or cy is None:
             return None
@@ -351,13 +381,46 @@ class Record3DCapture:
             for idx, candidate in enumerate(candidates):
                 source = candidate_sources[idx] if idx < len(candidate_sources) else f"candidate[{idx}]"
                 desc.append(f"{source}:{type(candidate).__name__}")
+            details: list[str] = []
+            for idx, candidate in enumerate(candidates):
+                source = candidate_sources[idx] if idx < len(candidate_sources) else f"candidate[{idx}]"
+                try:
+                    names = [n for n in dir(candidate) if not n.startswith("_")]
+                    details.append(f"{source}.attrs={names[:16]}")
+                except Exception:
+                    pass
             stream_type = type(self._stream).__name__ if self._stream is not None else "None"
             print(
                 "[capture] intrinsics unavailable yet; waiting for metadata. "
-                f"stream_type={stream_type} candidates={desc}"
+                f"stream_type={stream_type} candidates={desc} details={details}"
             )
             self._intrinsics_warning_printed = True
         return None
+
+    def _fix_depth_shape(self, rgb: np.ndarray, depth_m: np.ndarray) -> np.ndarray:
+        rgb_h, rgb_w = rgb.shape[:2]
+        depth_h, depth_w = depth_m.shape[:2]
+        if (depth_h, depth_w) == (rgb_h, rgb_w):
+            return depth_m
+
+        if not self._shape_fix_warning_printed:
+            print(
+                "[capture] depth/rgb shape mismatch, resizing depth to rgb grid "
+                f"depth={depth_w}x{depth_h} rgb={rgb_w}x{rgb_h}"
+            )
+            self._shape_fix_warning_printed = True
+
+        if cv2 is not None:
+            resized = cv2.resize(depth_m, (rgb_w, rgb_h), interpolation=cv2.INTER_NEAREST)
+            return np.ascontiguousarray(resized.astype(np.float32, copy=False))
+
+        # Fallback without OpenCV (nearest-neighbor using index mapping).
+        y_idx = (np.arange(rgb_h) * (depth_h / rgb_h)).astype(np.int32)
+        x_idx = (np.arange(rgb_w) * (depth_w / rgb_w)).astype(np.int32)
+        y_idx = np.clip(y_idx, 0, depth_h - 1)
+        x_idx = np.clip(x_idx, 0, depth_w - 1)
+        resized = depth_m[y_idx[:, None], x_idx[None, :]]
+        return np.ascontiguousarray(resized.astype(np.float32, copy=False))
 
     def _extract_rgb(self, frame: Any) -> np.ndarray:
         rgb_raw = None
@@ -458,10 +521,7 @@ class Record3DCapture:
         except RuntimeError:
             return None
         rgb, depth_m = self._apply_device_specific_transforms(rgb, depth_m)
-        if depth_m.shape[:2] != rgb.shape[:2]:
-            raise RuntimeError(
-                f"Depth/RGB shape mismatch. RGB={rgb.shape[:2]} depth={depth_m.shape[:2]}"
-            )
+        depth_m = self._fix_depth_shape(rgb, depth_m)
         intrinsics = self._extract_intrinsics(frame, width=rgb.shape[1], height=rgb.shape[0])
         if intrinsics is None:
             return None
