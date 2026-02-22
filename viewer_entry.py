@@ -13,6 +13,23 @@ from pointcloud_locator.point_cloud import load_point_cloud
 from yolo import RealtimeYoloVideoBBoxStream
 
 
+def _resolve_yolo_device(cli_device: str | None, config_device: str | None) -> str | None:
+    """Resolve YOLO device with precedence: CLI > config > auto-detect CUDA > default."""
+    if cli_device is not None:
+        return cli_device
+    if config_device is not None:
+        return config_device
+
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return "0"
+    except Exception:
+        pass
+
+    return None
+
+
 def _load_realtime_config(config_path: Path) -> tuple[float, float | None, float | None, str | None, bool, str, float, bool]:
     """Load realtime YOLO/viewer configuration.
 
@@ -80,6 +97,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--camera-config", type=Path, default=Path("assets/sample_camera_config.json"), help="Path to camera config JSON")
     parser.add_argument("--model", type=Path, default=Path("yolo26n.pt"), help="YOLO model weights path")
     parser.add_argument("--realtime-config", type=Path, default=Path("config/realtime_yolo_config.json"), help="Realtime update config JSON")
+    parser.add_argument("--device", type=str, default=None, help="YOLO device override, e.g. 0, 1, cpu")
     parser.add_argument("--point-size", type=float, default=2.0, help="Point size in viewer")
     parser.add_argument("--max-points", type=int, default=750_000, help="Max points after random downsampling")
     parser.add_argument("--ray-radius", type=float, default=0.08, help="Ray hit radius")
@@ -117,12 +135,13 @@ def main() -> None:
     else:
         initial_point_cloud_path = point_cloud_path
 
+    resolved_device = _resolve_yolo_device(args.device, device)
     stream = RealtimeYoloVideoBBoxStream(
         video_path=args.video,
         model_path=args.model,
         conf=conf,
         iou=iou,
-        device=device,
+        device=resolved_device,
         show_window=show_window,
         window_name=window_name,
     )
@@ -143,6 +162,7 @@ def main() -> None:
 
     print(f"[live] update interval: {update_interval_ms:.0f} ms ({args.realtime_config})")
     print(f"[live] video source: {args.video}")
+    print(f"[live] yolo device: {resolved_device if resolved_device is not None else 'default(auto)'}")
 
     try:
         view_point_cloud(
