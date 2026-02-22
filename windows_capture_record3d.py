@@ -72,6 +72,9 @@ def _to_monotonic_seconds(value: float | int | None) -> float:
 class Record3DCapture:
     """Live capture wrapper around the Record3D Python API."""
 
+    DEVICE_TYPE_TRUEDEPTH = 0
+    DEVICE_TYPE_LIDAR = 1
+
     def __init__(
         self,
         device_index: int = 0,
@@ -92,9 +95,10 @@ class Record3DCapture:
         self._new_frame_event = threading.Event()
         self._started = False
         self._seq = 0
+        self._device_type: int | None = None
 
     @staticmethod
-    def list_devices() -> list[Any]:
+    def _load_record3d() -> tuple[Any, Any, list[Any]]:
         try:
             import record3d as r3d  # type: ignore[import-not-found]
         except ImportError as exc:  # pragma: no cover - depends on host
@@ -102,7 +106,31 @@ class Record3DCapture:
                 "Record3D Python module is not installed. "
                 "Install it on Windows from the Record3D SDK instructions."
             ) from exc
-        return list(r3d.get_connected_devices())
+
+        stream_cls = getattr(r3d, "Record3DStream", None)
+        if stream_cls is None:
+            raise RuntimeError(
+                "record3d.Record3DStream was not found in the installed package. "
+                "Check the package version against the Record3D demo-main.py API."
+            )
+
+        get_devices = getattr(stream_cls, "get_connected_devices", None)
+        if callable(get_devices):
+            devices = list(get_devices())
+        else:
+            module_get_devices = getattr(r3d, "get_connected_devices", None)
+            if not callable(module_get_devices):
+                raise RuntimeError(
+                    "Record3D device enumeration API not found. "
+                    "Expected Record3DStream.get_connected_devices() or record3d.get_connected_devices()."
+                )
+            devices = list(module_get_devices())
+        return r3d, stream_cls, devices
+
+    @staticmethod
+    def list_devices() -> list[Any]:
+        _, _, devices = Record3DCapture._load_record3d()
+        return devices
 
     def _connect_stream(self, stream: Any, device: Any) -> None:
         connect_fn = getattr(stream, "connect", None)
@@ -127,15 +155,7 @@ class Record3DCapture:
     def start(self) -> None:
         if self._started:
             return
-        try:
-            import record3d as r3d  # type: ignore[import-not-found]
-        except ImportError as exc:  # pragma: no cover - depends on host
-            raise RuntimeError(
-                "Record3D Python module is not installed. "
-                "Install it on Windows from the Record3D SDK instructions."
-            ) from exc
-
-        devices = list(r3d.get_connected_devices())
+        _, stream_cls, devices = self._load_record3d()
         if not devices:
             raise RuntimeError("No Record3D devices detected over USB")
         if self.device_index < 0 or self.device_index >= len(devices):
@@ -143,17 +163,29 @@ class Record3DCapture:
                 f"device_index {self.device_index} out of range (found {len(devices)} devices)"
             )
         device = devices[self.device_index]
-        stream = r3d.Record3DStream()
+        stream = stream_cls()
+
+        def _on_new_frame(*_args: Any, **_kwargs: Any) -> None:
+            self._new_frame_event.set()
+
+        def _on_stream_stopped(*_args: Any, **_kwargs: Any) -> None:
+            print("[record3d] stream stopped")
 
         if hasattr(stream, "on_new_frame"):
-            stream.on_new_frame = self._new_frame_event.set
+            stream.on_new_frame = _on_new_frame
         if hasattr(stream, "on_stream_stopped"):
-            stream.on_stream_stopped = lambda: print("[record3d] stream stopped")
+            stream.on_stream_stopped = _on_stream_stopped
 
         self._connect_stream(stream, device)
         start_fn = getattr(stream, "start", None)
         if callable(start_fn):
             start_fn()
+        device_type = _call_first(stream, ("get_device_type", "device_type"))
+        if device_type is not None:
+            try:
+                self._device_type = int(device_type)
+            except Exception:
+                self._device_type = None
         self._stream = stream
         self._started = True
 
@@ -169,30 +201,79 @@ class Record3DCapture:
                 pass
         self._stream = None
         self._started = False
+        self._device_type = None
         self._new_frame_event.clear()
 
-    def _extract_intrinsics(self, frame: Any, width: int, height: int) -> Intrinsics:
-        matrix = _call_first(frame, ("get_intrinsic_mat", "get_intrinsics_mat", "get_intrinsics"))
-        if matrix is None and self._stream is not None:
-            matrix = _call_first(self._stream, ("get_intrinsic_mat", "get_intrinsics"))
+    @staticmethod
+    def _intrinsics_from_coeffs(coeffs: Any, width: int, height: int) -> Intrinsics | None:
+        if coeffs is None:
+            return None
+
+        def _as_float(value: Any) -> float | None:
+            try:
+                return float(value)
+            except Exception:
+                return None
+
+        fx = fy = cx = cy = None
+        if isinstance(coeffs, dict):
+            fx = _as_float(coeffs.get("fx"))
+            fy = _as_float(coeffs.get("fy"))
+            cx = _as_float(coeffs.get("tx", coeffs.get("cx")))
+            cy = _as_float(coeffs.get("ty", coeffs.get("cy")))
+        else:
+            fx = _as_float(getattr(coeffs, "fx", None))
+            fy = _as_float(getattr(coeffs, "fy", None))
+            cx = _as_float(getattr(coeffs, "tx", getattr(coeffs, "cx", None)))
+            cy = _as_float(getattr(coeffs, "ty", getattr(coeffs, "cy", None)))
+
+        if fx is None or fy is None or cx is None or cy is None:
+            return None
+        if fx <= 0.0 or fy <= 0.0:
+            return None
+        return Intrinsics(width=width, height=height, fx=fx, fy=fy, cx=cx, cy=cy)
+
+    @staticmethod
+    def _intrinsics_from_matrix(matrix: Any, width: int, height: int) -> Intrinsics | None:
         if matrix is None:
-            raise RuntimeError("Record3D intrinsics not available in frame metadata")
-
-        mat = np.asarray(matrix, dtype=np.float64)
+            return None
+        try:
+            mat = np.asarray(matrix, dtype=np.float64)
+        except Exception:
+            return None
         if mat.shape != (3, 3):
-            raise RuntimeError(f"Unsupported intrinsics format: shape={mat.shape}")
-
+            return None
         fx = float(mat[0, 0])
         fy = float(mat[1, 1])
         cx = float(mat[0, 2])
         cy = float(mat[1, 2])
         if fx <= 0.0 or fy <= 0.0:
-            raise RuntimeError(f"Invalid intrinsics fx/fy: {fx}, {fy}")
-
+            return None
         return Intrinsics(width=width, height=height, fx=fx, fy=fy, cx=cx, cy=cy)
 
+    def _extract_intrinsics(self, frame: Any, width: int, height: int) -> Intrinsics:
+        candidates: list[Any] = []
+        if frame is not None:
+            candidates.append(_call_first(frame, ("get_intrinsic_mat", "get_intrinsics_mat", "get_intrinsics")))
+        if self._stream is not None:
+            candidates.append(_call_first(self._stream, ("get_intrinsic_mat", "get_intrinsics_mat", "get_intrinsics")))
+
+        for candidate in candidates:
+            intr = self._intrinsics_from_matrix(candidate, width=width, height=height)
+            if intr is not None:
+                return intr
+            intr = self._intrinsics_from_coeffs(candidate, width=width, height=height)
+            if intr is not None:
+                return intr
+
+        raise RuntimeError("Record3D intrinsics not available in frame metadata")
+
     def _extract_rgb(self, frame: Any) -> np.ndarray:
-        rgb_raw = _call_first(frame, ("get_rgb_frame", "get_color_frame", "get_image"))
+        rgb_raw = None
+        if frame is not None:
+            rgb_raw = _call_first(frame, ("get_rgb_frame", "get_color_frame", "get_image"))
+        if rgb_raw is None and self._stream is not None:
+            rgb_raw = _call_first(self._stream, ("get_rgb_frame", "get_color_frame", "get_image"))
         if rgb_raw is None:
             raise RuntimeError("Record3D frame did not provide RGB data")
         rgb = np.asarray(rgb_raw)
@@ -207,7 +288,11 @@ class Record3DCapture:
         return np.ascontiguousarray(rgb)
 
     def _extract_depth(self, frame: Any) -> np.ndarray:
-        depth_raw = _call_first(frame, ("get_depth_frame", "get_depth_map", "get_depth"))
+        depth_raw = None
+        if frame is not None:
+            depth_raw = _call_first(frame, ("get_depth_frame", "get_depth_map", "get_depth"))
+        if depth_raw is None and self._stream is not None:
+            depth_raw = _call_first(self._stream, ("get_depth_frame", "get_depth_map", "get_depth"))
         if depth_raw is None:
             raise RuntimeError("Record3D frame did not provide depth data")
         depth = np.asarray(depth_raw)
@@ -235,11 +320,25 @@ class Record3DCapture:
         return np.ascontiguousarray(depth_m)
 
     def _extract_timestamp(self, frame: Any) -> float:
-        ts_raw = _call_first(
-            frame,
-            ("get_timestamp", "get_frame_timestamp", "timestamp", "time", "ts"),
-        )
+        ts_raw = None
+        if frame is not None:
+            ts_raw = _call_first(
+                frame,
+                ("get_timestamp", "get_frame_timestamp", "timestamp", "time", "ts"),
+            )
+        if ts_raw is None and self._stream is not None:
+            ts_raw = _call_first(
+                self._stream,
+                ("get_timestamp", "get_frame_timestamp", "timestamp", "time", "ts"),
+            )
         return _to_monotonic_seconds(ts_raw)
+
+    def _apply_device_specific_transforms(self, rgb: np.ndarray, depth_m: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        # Per Record3D demo-main.py, TrueDepth frames must be mirrored.
+        if self._device_type == self.DEVICE_TYPE_TRUEDEPTH:
+            rgb = np.ascontiguousarray(np.flip(rgb, axis=1))
+            depth_m = np.ascontiguousarray(np.flip(depth_m, axis=1))
+        return rgb, depth_m
 
     def get_frame(self, timeout_s: float = 1.0) -> RGBDFrame | None:
         if not self._started:
@@ -250,11 +349,10 @@ class Record3DCapture:
 
         assert self._stream is not None
         frame = _call_first(self._stream, ("get_current_frame", "get_frame"))
-        if frame is None:
-            return None
 
         rgb = self._extract_rgb(frame)
         depth_m = self._extract_depth(frame)
+        rgb, depth_m = self._apply_device_specific_transforms(rgb, depth_m)
         if depth_m.shape[:2] != rgb.shape[:2]:
             raise RuntimeError(
                 f"Depth/RGB shape mismatch. RGB={rgb.shape[:2]} depth={depth_m.shape[:2]}"
