@@ -264,6 +264,49 @@ def _create_axis_indicator(o3d, size: float, origin: np.ndarray, rotation: np.nd
     return axis
 
 
+def _create_cylinder_between_points(
+    o3d,
+    p0: np.ndarray,
+    p1: np.ndarray,
+    radius: float,
+    color: np.ndarray,
+):
+    """Create a cylinder mesh segment from ``p0`` to ``p1``."""
+    v = p1 - p0
+    length = float(np.linalg.norm(v))
+    if length <= 1e-9:
+        return None
+
+    z_axis = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+    direction = v / length
+
+    cylinder = o3d.geometry.TriangleMesh.create_cylinder(radius=float(radius), height=length)
+    cylinder.compute_vertex_normals()
+    cylinder.paint_uniform_color(np.asarray(color, dtype=np.float64).tolist())
+
+    cross = np.cross(z_axis, direction)
+    cross_norm = float(np.linalg.norm(cross))
+    dot = float(np.dot(z_axis, direction))
+
+    if cross_norm <= 1e-9:
+        if dot < 0.0:
+            r = np.array(
+                [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]],
+                dtype=np.float64,
+            )
+        else:
+            r = np.eye(3, dtype=np.float64)
+    else:
+        axis = cross / cross_norm
+        angle = float(np.arccos(np.clip(dot, -1.0, 1.0)))
+        axis_angle = axis * angle
+        r = o3d.geometry.get_rotation_matrix_from_axis_angle(axis_angle)
+
+    cylinder.rotate(r, center=np.zeros(3, dtype=np.float64))
+    cylinder.translate((p0 + p1) * 0.5)
+    return cylinder
+
+
 def _euler_deg_to_matrix(euler_deg: np.ndarray) -> np.ndarray:
     euler_rad = np.deg2rad(euler_deg)
     roll, pitch, yaw = euler_rad
@@ -491,6 +534,7 @@ def view_point_cloud(
             "camera_marker",
             "image_overlay",
             "ray_hits_overlay",
+            "ray_hits_mesh",
             "hit_radius_mesh",
         ):
             if key in dynamic_geometries:
@@ -521,6 +565,7 @@ def view_point_cloud(
         hit_points: list[np.ndarray] = []
         hit_lines: list[list[int]] = []
         hit_colors: list[list[float]] = []
+        hit_segments: list[tuple[np.ndarray, np.ndarray]] = []
 
         for i, bbox in enumerate(active_bboxes):
             origin, direction = pixel_to_ray(
@@ -546,6 +591,7 @@ def view_point_cloud(
                 hit_points.append(hit_pos)
                 hit_lines.append([start_idx, start_idx + 1])
                 hit_colors.append([1.0, 0.95, 0.1])
+                hit_segments.append((origin, hit_pos))
 
         pcd.colors = o3d.utility.Vector3dVector(updated_colors)
         vis_obj.update_geometry(pcd)
@@ -556,6 +602,25 @@ def view_point_cloud(
             ray_hits_overlay.points = o3d.utility.Vector3dVector(np.asarray(hit_points, dtype=np.float64))
             ray_hits_overlay.lines = o3d.utility.Vector2iVector(np.asarray(hit_lines, dtype=np.int32))
             ray_hits_overlay.colors = o3d.utility.Vector3dVector(np.asarray(hit_colors, dtype=np.float64))
+
+        ray_hits_mesh = None
+        if hit_segments:
+            ray_mesh_radius = max(0.004, float(ray_radius) * 0.25)
+            ray_color = np.array([1.0, 0.95, 0.1], dtype=np.float64)
+            for p0, p1 in hit_segments:
+                seg_mesh = _create_cylinder_between_points(
+                    o3d=o3d,
+                    p0=np.asarray(p0, dtype=np.float64),
+                    p1=np.asarray(p1, dtype=np.float64),
+                    radius=ray_mesh_radius,
+                    color=ray_color,
+                )
+                if seg_mesh is None:
+                    continue
+                if ray_hits_mesh is None:
+                    ray_hits_mesh = seg_mesh
+                else:
+                    ray_hits_mesh += seg_mesh
 
         hit_radius_mesh = None
         if show_hit_radius_spheres and hit_lines:
@@ -574,6 +639,8 @@ def view_point_cloud(
         dynamic_geometries["image_overlay"] = image_overlay
         if ray_hits_overlay is not None:
             dynamic_geometries["ray_hits_overlay"] = ray_hits_overlay
+        if ray_hits_mesh is not None:
+            dynamic_geometries["ray_hits_mesh"] = ray_hits_mesh
         if hit_radius_mesh is not None:
             dynamic_geometries["hit_radius_mesh"] = hit_radius_mesh
 
@@ -582,6 +649,8 @@ def view_point_cloud(
         vis_obj.add_geometry(image_overlay, reset_bounding_box=False)
         if ray_hits_overlay is not None:
             vis_obj.add_geometry(ray_hits_overlay, reset_bounding_box=False)
+        if ray_hits_mesh is not None:
+            vis_obj.add_geometry(ray_hits_mesh, reset_bounding_box=False)
         if hit_radius_mesh is not None:
             vis_obj.add_geometry(hit_radius_mesh, reset_bounding_box=False)
         vis_obj.update_renderer()
@@ -658,6 +727,31 @@ def view_point_cloud(
     vis.register_key_callback(ord("X"), lambda _v: (setattr(intrinsics, "fx", intrinsics.fx + step_focal), setattr(intrinsics, "fy", intrinsics.fy + step_focal), _apply_and_refresh("[intrinsics]"), False)[-1])
     vis.register_key_callback(ord("H"), lambda _v: (_print_camera_state("[camera-state]"), False)[-1])
 
+    def _focus_view_on_camera(_v):
+        # Move viewport focus to the current camera object and align view direction.
+        view_ctl_local = vis.get_view_control()
+        cam_rot = _euler_deg_to_matrix(camera_euler_deg)
+        cam_forward = cam_rot @ np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        cam_up = cam_rot @ np.array([0.0, -1.0, 0.0], dtype=np.float64)
+
+        # Open3D front points from lookat towards eye, so invert camera forward.
+        front = -cam_forward
+        front_norm = float(np.linalg.norm(front))
+        up_norm = float(np.linalg.norm(cam_up))
+        if front_norm > 1e-9:
+            front = front / front_norm
+        if up_norm > 1e-9:
+            cam_up = cam_up / up_norm
+
+        view_ctl_local.set_lookat(camera_position.astype(np.float64))
+        view_ctl_local.set_front(front.astype(np.float64))
+        view_ctl_local.set_up(cam_up.astype(np.float64))
+        view_ctl_local.set_zoom(0.45)
+        vis.update_renderer()
+        return False
+
+    vis.register_key_callback(ord("R"), _focus_view_on_camera)
+
     def _plane_minus(_v):
         nonlocal plane_distance
         plane_distance = max(0.05, plane_distance - step_plane)
@@ -720,7 +814,7 @@ def view_point_cloud(
     print("  Left drag: rotate")
     print("  Right drag / Shift+Left drag: pan")
     print("  Mouse wheel: zoom")
-    print("  R: reset view (viewer camera)")
+    print("  R: focus viewport on camera object")
     print("  Q or Esc: quit")
     print("  XYZ axis + XY grid are shown at origin")
     print(f"  Camera config: {camera_config}")

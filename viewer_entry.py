@@ -8,9 +8,12 @@ import json
 from pathlib import Path
 from typing import Any
 
+from ultralytics import YOLO
+
 from pointcloud_locator.viewer import view_point_cloud
+from pointcloud_locator import yolo_output_to_viewer_bboxes
 from pointcloud_locator.point_cloud import load_point_cloud
-from yolo import RealtimeYoloVideoBBoxStream
+from yolo import RealtimeYoloVideoBBoxStream, RealtimeYoloImageFolderBBoxStream
 
 
 def _resolve_yolo_device(cli_device: str | None, config_device: str | None) -> str | None:
@@ -88,6 +91,120 @@ def _build_point_cloud_folder_provider(pcd_files: list[Path], loop: bool):
     return _provider
 
 
+def _list_image_files(folder: Path) -> list[Path]:
+    exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
+    return sorted(p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in exts)
+
+
+def _build_synced_folder_providers(
+    pcd_files: list[Path],
+    image_files: list[Path],
+    *,
+    model_path: Path,
+    conf: float | None,
+    iou: float | None,
+    device: str | None,
+    loop: bool,
+    show_window: bool,
+    window_name: str,
+):
+    model = YOLO(str(model_path))
+
+    cv2 = None
+    if show_window:
+        try:
+            import cv2 as _cv2
+            cv2 = _cv2
+        except Exception as exc:
+            raise RuntimeError(f"OpenCV is required for YOLO display window: {exc}") from exc
+
+    pair_count = min(len(pcd_files), len(image_files))
+    if pair_count <= 0:
+        raise ValueError("Need at least one point cloud and one image file for synchronized mode")
+
+    state: dict[str, Any] = {
+        "next_idx": 1,  # index 0 is used for initial frame
+        "latest_payload": None,  # tuple[list[BoundingBox], tuple[int, int] | None]
+        "latest_seq": -1,
+        "last_bbox_seq": -1,
+        "stopped": False,
+    }
+
+    def _infer_image(image_path: Path):
+        predict_kwargs: dict[str, Any] = {
+            "source": str(image_path),
+            "verbose": False,
+        }
+        if conf is not None:
+            predict_kwargs["conf"] = conf
+        if iou is not None:
+            predict_kwargs["iou"] = iou
+        if device is not None:
+            predict_kwargs["device"] = device
+
+        results = model.predict(**predict_kwargs)
+        if not results:
+                return [], None, None
+
+        result = results[0]
+        boxes = yolo_output_to_viewer_bboxes(result)
+        source_size = None
+        if hasattr(result, "orig_shape"):
+            h, w = result.orig_shape[:2]
+            source_size = (int(w), int(h))
+            annotated = result.plot() if cv2 is not None else None
+            return boxes, source_size, annotated
+
+    def _advance_index(idx: int) -> int | None:
+        if idx >= pair_count:
+            if not loop:
+                return None
+            return 0
+        return idx
+
+    def _pc_provider():
+        if bool(state["stopped"]):
+            return None
+
+        idx = _advance_index(int(state["next_idx"]))
+        if idx is None:
+            if cv2 is not None:
+                try:
+                    cv2.destroyWindow(window_name)
+                except Exception:
+                    pass
+            return None
+
+        points = load_point_cloud(pcd_files[idx])
+        boxes, source_size, annotated = _infer_image(image_files[idx])
+
+        if cv2 is not None:
+            if annotated is not None:
+                cv2.imshow(window_name, annotated)
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord("q"):
+                    state["stopped"] = True
+                    try:
+                        cv2.destroyWindow(window_name)
+                    except Exception:
+                        pass
+                    return None
+
+        state["latest_payload"] = (boxes, source_size)
+        state["latest_seq"] = int(state["latest_seq"]) + 1
+        state["next_idx"] = idx + 1
+        return points
+
+    def _bbox_provider():
+        latest_seq = int(state["latest_seq"])
+        if latest_seq < 0 or latest_seq == int(state["last_bbox_seq"]):
+            return None
+        state["last_bbox_seq"] = latest_seq
+        return state["latest_payload"]
+
+    return _pc_provider, _bbox_provider, pair_count
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run YOLO on an MP4 stream and open viewer with realtime bounding-box updates.",
@@ -119,49 +236,101 @@ def main() -> None:
     ) = _load_realtime_config(args.realtime_config)
 
     point_cloud_path = args.point_cloud
+    video_path = args.video
     live_point_cloud_provider = None
+    live_bbox_provider = None
+    stream = None
+    bbox_update_interval_ms = update_interval_ms
 
     if point_cloud_path.is_dir():
         pcd_files = sorted(point_cloud_path.glob("*.pcd"))
         if not pcd_files:
             raise ValueError(f"No .pcd files found in folder: {point_cloud_path}")
-        initial_point_cloud_path = pcd_files[0]
-        live_point_cloud_provider = _build_point_cloud_folder_provider(
-            pcd_files=pcd_files,
-            loop=point_cloud_loop,
-        )
-        print(f"[live-pcd] source folder: {point_cloud_path} ({len(pcd_files)} files)")
-        print(f"[live-pcd] frame update interval: {point_cloud_update_interval_ms:.0f} ms")
+        if video_path.is_dir():
+            image_files = _list_image_files(video_path)
+            if not image_files:
+                raise ValueError(f"No image files found in folder: {video_path}")
+
+            pair_count = min(len(pcd_files), len(image_files))
+            if pair_count <= 0:
+                raise ValueError("No usable synchronized point-cloud/image pairs found")
+
+            initial_point_cloud_path = pcd_files[0]
+            live_point_cloud_provider, live_bbox_provider, _pair_count = _build_synced_folder_providers(
+                pcd_files=pcd_files,
+                image_files=image_files,
+                model_path=args.model,
+                conf=conf,
+                iou=iou,
+                device=_resolve_yolo_device(args.device, device),
+                loop=point_cloud_loop,
+                show_window=show_window,
+                window_name=window_name,
+            )
+            # Keep both updates on the same cadence in synchronized folder mode.
+            bbox_update_interval_ms = point_cloud_update_interval_ms
+
+            print(f"[live-sync] point-cloud folder: {point_cloud_path} ({len(pcd_files)} files)")
+            print(f"[live-sync] image folder: {video_path} ({len(image_files)} files)")
+            print(f"[live-sync] using {pair_count} synchronized pairs")
+            print(f"[live-sync] synchronized frame interval: {bbox_update_interval_ms:.0f} ms")
+        else:
+            initial_point_cloud_path = pcd_files[0]
+            live_point_cloud_provider = _build_point_cloud_folder_provider(
+                pcd_files=pcd_files,
+                loop=point_cloud_loop,
+            )
+            print(f"[live-pcd] source folder: {point_cloud_path} ({len(pcd_files)} files)")
+            print(f"[live-pcd] frame update interval: {point_cloud_update_interval_ms:.0f} ms")
     else:
         initial_point_cloud_path = point_cloud_path
 
     resolved_device = _resolve_yolo_device(args.device, device)
-    stream = RealtimeYoloVideoBBoxStream(
-        video_path=args.video,
-        model_path=args.model,
-        conf=conf,
-        iou=iou,
-        device=resolved_device,
-        show_window=show_window,
-        window_name=window_name,
-    )
-    stream.start()
+    if live_bbox_provider is None:
+        if args.video.is_dir():
+            stream = RealtimeYoloImageFolderBBoxStream(
+                image_dir=args.video,
+                model_path=args.model,
+                update_interval_ms=update_interval_ms,
+                loop=True,
+                conf=conf,
+                iou=iou,
+                device=resolved_device,
+                show_window=show_window,
+                window_name=window_name,
+            )
+            print(f"[live] image-folder source: {args.video}")
+            print(f"[live] image frame interval: {update_interval_ms:.0f} ms")
+        else:
+            stream = RealtimeYoloVideoBBoxStream(
+                video_path=args.video,
+                model_path=args.model,
+                conf=conf,
+                iou=iou,
+                device=resolved_device,
+                show_window=show_window,
+                window_name=window_name,
+            )
+            print(f"[live] video source: {args.video}")
 
-    last_seq = -1
+        stream.start()
 
-    def _live_bbox_provider():
-        nonlocal last_seq
-        boxes, source_size, seq = stream.get_latest()
-        if seq < 0 or seq == last_seq:
-            err = stream.get_last_error()
-            if err is not None:
-                raise RuntimeError(f"YOLO realtime stream failed: {err}")
-            return None
-        last_seq = seq
-        return boxes, source_size
+        last_seq = -1
 
-    print(f"[live] update interval: {update_interval_ms:.0f} ms ({args.realtime_config})")
-    print(f"[live] video source: {args.video}")
+        def _live_bbox_provider():
+            nonlocal last_seq
+            boxes, source_size, seq = stream.get_latest()
+            if seq < 0 or seq == last_seq:
+                err = stream.get_last_error()
+                if err is not None:
+                    raise RuntimeError(f"YOLO realtime stream failed: {err}")
+                return None
+            last_seq = seq
+            return boxes, source_size
+
+        live_bbox_provider = _live_bbox_provider
+
+    print(f"[live] update interval: {bbox_update_interval_ms:.0f} ms ({args.realtime_config})")
     print(f"[live] yolo device: {resolved_device if resolved_device is not None else 'default(auto)'}")
 
     try:
@@ -173,13 +342,14 @@ def main() -> None:
             ray_radius=args.ray_radius,
             bounding_boxes=[],
             bbox_image_size=None,
-            live_bbox_provider=_live_bbox_provider,
-            live_update_interval_ms=update_interval_ms,
+            live_bbox_provider=live_bbox_provider,
+            live_update_interval_ms=bbox_update_interval_ms,
             live_point_cloud_provider=live_point_cloud_provider,
             point_cloud_update_interval_ms=point_cloud_update_interval_ms,
         )
     finally:
-        stream.stop()
+        if stream is not None:
+            stream.stop()
 
 
 if __name__ == "__main__":

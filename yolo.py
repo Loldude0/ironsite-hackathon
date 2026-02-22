@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -107,6 +108,142 @@ class RealtimeYoloVideoBBoxStream:
 					if key == ord("q"):
 						self._stop_event.set()
 						break
+		except Exception as exc:
+			with self._lock:
+				self._last_error = exc
+		finally:
+			if cv2 is not None:
+				try:
+					cv2.destroyWindow(self.window_name)
+				except Exception:
+					pass
+
+
+class RealtimeYoloImageFolderBBoxStream:
+	"""Background YOLO stream over image files in a folder at fixed intervals."""
+
+	def __init__(
+		self,
+		image_dir: str | Path,
+		model_path: str | Path = "yolo26n.pt",
+		update_interval_ms: float = 200.0,
+		loop: bool = True,
+		conf: float | None = None,
+		iou: float | None = None,
+		device: str | None = None,
+		show_window: bool = False,
+		window_name: str = "YOLO Realtime",
+	) -> None:
+		self.image_dir = Path(image_dir)
+		self.model_path = Path(model_path)
+		self.update_interval_ms = float(update_interval_ms)
+		self.loop = bool(loop)
+		self.conf = conf
+		self.iou = iou
+		self.device = device
+		self.show_window = show_window
+		self.window_name = window_name
+
+		self._lock = threading.Lock()
+		self._stop_event = threading.Event()
+		self._thread: threading.Thread | None = None
+
+		self._latest_boxes: list[BoundingBox] = []
+		self._latest_size: tuple[int, int] | None = None
+		self._latest_seq: int = -1
+		self._last_error: Exception | None = None
+
+	def start(self) -> None:
+		if self._thread is not None:
+			return
+		self._thread = threading.Thread(target=self._run, name="yolo-image-folder-stream", daemon=True)
+		self._thread.start()
+
+	def stop(self, timeout: float = 2.0) -> None:
+		self._stop_event.set()
+		if self._thread is not None:
+			self._thread.join(timeout=timeout)
+
+	def get_latest(self) -> tuple[list[BoundingBox], tuple[int, int] | None, int]:
+		with self._lock:
+			return list(self._latest_boxes), self._latest_size, self._latest_seq
+
+	def get_last_error(self) -> Exception | None:
+		with self._lock:
+			return self._last_error
+
+	def _run(self) -> None:
+		cv2 = None
+		if self.show_window:
+			try:
+				import cv2 as _cv2
+				cv2 = _cv2
+			except Exception as exc:
+				with self._lock:
+					self._last_error = RuntimeError(f"OpenCV is required for YOLO display window: {exc}")
+				return
+
+		try:
+			image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
+			image_files = sorted(
+				p for p in self.image_dir.iterdir() if p.is_file() and p.suffix.lower() in image_exts
+			)
+			if not image_files:
+				raise ValueError(f"No image files found in folder: {self.image_dir}")
+
+			model = YOLO(str(self.model_path))
+			idx = 0
+			interval_s = max(self.update_interval_ms, 1.0) / 1000.0
+
+			while not self._stop_event.is_set():
+				if idx >= len(image_files):
+					if not self.loop:
+						break
+					idx = 0
+
+				start_t = time.monotonic()
+				image_path = image_files[idx]
+				idx += 1
+
+				predict_kwargs: dict[str, Any] = {
+					"source": str(image_path),
+					"verbose": False,
+				}
+				if self.conf is not None:
+					predict_kwargs["conf"] = self.conf
+				if self.iou is not None:
+					predict_kwargs["iou"] = self.iou
+				if self.device is not None:
+					predict_kwargs["device"] = self.device
+
+				results = model.predict(**predict_kwargs)
+				if not results:
+					continue
+
+				result = results[0]
+				boxes = yolo_output_to_viewer_bboxes(result)
+				source_size: tuple[int, int] | None = None
+				if hasattr(result, "orig_shape"):
+					h, w = result.orig_shape[:2]
+					source_size = (int(w), int(h))
+
+				with self._lock:
+					self._latest_boxes = boxes
+					self._latest_size = source_size
+					self._latest_seq += 1
+
+				if cv2 is not None:
+					annotated = result.plot()
+					cv2.imshow(self.window_name, annotated)
+					key = cv2.waitKey(1) & 0xFF
+					if key == ord("q"):
+						self._stop_event.set()
+						break
+
+				elapsed = time.monotonic() - start_t
+				sleep_s = interval_s - elapsed
+				if sleep_s > 0:
+					time.sleep(sleep_s)
 		except Exception as exc:
 			with self._lock:
 				self._last_error = exc

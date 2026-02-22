@@ -28,6 +28,11 @@ python viewer_entry.py assets/sample.pcd --video assets/sample_yolo.mp4 --camera
 
 You can also pass a folder containing multiple `.pcd` files as the first argument. In that mode, the viewer updates the displayed point cloud frame-by-frame at the interval configured in `point_cloud.update_interval_ms`.
 
+If `--video` is also a folder (images), `viewer_entry.py` now runs in synchronized mode:
+- point cloud frame `i` and image frame `i` are advanced together
+- YOLO is run on that image frame
+- both update on the same cadence (`point_cloud.update_interval_ms`, default 200ms)
+
 ```bash
 python viewer_entry.py assets/converted_pcd --video assets/big_buck_bunny.mp4 --camera-config config/sample_camera_config.json --model yolo26n.pt --realtime-config config/realtime_yolo_config.json --ray-radius 0.08
 ```
