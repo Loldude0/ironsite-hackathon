@@ -5,3 +5,6 @@ ultralytics
 onnx
 opencv-python
 rosbags
+pyzmq
+zstandard
+pyyaml
