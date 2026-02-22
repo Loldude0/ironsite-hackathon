@@ -70,6 +70,16 @@ Building this required bridging mobile consumer hardware with edge-compute SLAM 
 
 ---
 
+## 📄 Technical Report
+
+For a detailed treatment of our estimation formulation, semantic lifting pipeline, and system architecture, see the full technical report:
+
+**[AnchorVision.pdf](./AnchorVision.pdf)** — *UWB-Anchored LiDAR-Aided SLAM for Compute-Efficient Multi-Agent Construction Mapping: Spatiotemporal Semantic Search via 2D Detection Lifted into 3D*
+
+The report includes the formal factor-graph problem statement, the ray-casting math for 3D semantic localization, and a discussion of UWB error modes and mitigation strategies.
+
+---
+
 ## 📊 Research Findings & Artifact-Backed Evidence
 
 All values below are extracted from artifacts present in this repository, proving our end-to-end integration works across multiple sessions.
