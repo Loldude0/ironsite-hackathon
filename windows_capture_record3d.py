@@ -96,6 +96,9 @@ class Record3DCapture:
         self._started = False
         self._seq = 0
         self._device_type: int | None = None
+        self._use_poll_fallback = False
+        self._fallback_notice_printed = False
+        self._poll_interval_s = 1.0 / 60.0
 
     @staticmethod
     def _load_record3d() -> tuple[Any, Any, list[Any]]:
@@ -210,6 +213,8 @@ class Record3DCapture:
         self._stream = None
         self._started = False
         self._device_type = None
+        self._use_poll_fallback = False
+        self._fallback_notice_printed = False
         self._new_frame_event.clear()
 
     @staticmethod
@@ -351,15 +356,29 @@ class Record3DCapture:
     def get_frame(self, timeout_s: float = 1.0) -> RGBDFrame | None:
         if not self._started:
             raise RuntimeError("Capture stream is not started")
-        if not self._new_frame_event.wait(timeout=timeout_s):
-            return None
-        self._new_frame_event.clear()
+        if not self._use_poll_fallback:
+            if not self._new_frame_event.wait(timeout=timeout_s):
+                self._use_poll_fallback = True
+                if not self._fallback_notice_printed:
+                    print(
+                        "[capture] on_new_frame callback timed out; "
+                        "switching to direct polling fallback"
+                    )
+                    self._fallback_notice_printed = True
+            else:
+                self._new_frame_event.clear()
+        else:
+            # Poll gently to avoid spinning while waiting for the next frame.
+            time.sleep(self._poll_interval_s)
 
         assert self._stream is not None
         frame = _call_first(self._stream, ("get_current_frame", "get_frame"))
 
-        rgb = self._extract_rgb(frame)
-        depth_m = self._extract_depth(frame)
+        try:
+            rgb = self._extract_rgb(frame)
+            depth_m = self._extract_depth(frame)
+        except RuntimeError:
+            return None
         rgb, depth_m = self._apply_device_specific_transforms(rgb, depth_m)
         if depth_m.shape[:2] != rgb.shape[:2]:
             raise RuntimeError(
