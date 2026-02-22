@@ -24,6 +24,9 @@ POSE_STREAM_ENDPOINT="${POSE_STREAM_ENDPOINT:-}"
 NODE_ID="${NODE_ID:-worker_node}"
 SESSION_ID="${SESSION_ID:-session_default}"
 POSE_STREAM_RATE_HZ="${POSE_STREAM_RATE_HZ:-15}"
+FRAME_SAMPLE_DIR="${FRAME_SAMPLE_DIR:-${REPO_ROOT}/outputs/frame_samples}"
+FRAME_SAMPLE_EVERY_N="${FRAME_SAMPLE_EVERY_N:-15}"
+FRAME_SAMPLE_PCD_PIXEL_STRIDE="${FRAME_SAMPLE_PCD_PIXEL_STRIDE:-1}"
 
 if [[ "${ENABLE_VIEWER}" == "1" && -z "${DISPLAY:-}" ]]; then
   echo "[run] no DISPLAY detected; disabling Pangolin viewer (set ENABLE_VIEWER=1 once X11/xpra is available)"
@@ -128,6 +131,11 @@ if [[ -n "${POSE_STREAM_ENDPOINT}" ]]; then
   CMD+=(--session-id "${SESSION_ID}")
   CMD+=(--pose-stream-rate-hz "${POSE_STREAM_RATE_HZ}")
 fi
+if [[ -n "${FRAME_SAMPLE_DIR}" && "${FRAME_SAMPLE_EVERY_N}" != "0" ]]; then
+  CMD+=(--sample-output-dir "${FRAME_SAMPLE_DIR}")
+  CMD+=(--sample-every-n "${FRAME_SAMPLE_EVERY_N}")
+  CMD+=(--sample-pcd-pixel-stride "${FRAME_SAMPLE_PCD_PIXEL_STRIDE}")
+fi
 
 if [[ $# -gt 0 ]]; then
   CMD+=("$@")
@@ -137,5 +145,8 @@ echo "[run] starting ORB bridge"
 echo "[run] endpoint=${ZMQ_ENDPOINT} topic=${ZMQ_TOPIC} bind=${ZMQ_BIND} viewer=${ENABLE_VIEWER} sensor=${SENSOR_MODE}"
 if [[ -n "${POSE_STREAM_ENDPOINT}" ]]; then
   echo "[run] pose_stream=${POSE_STREAM_ENDPOINT} node_id=${NODE_ID} session_id=${SESSION_ID} rate_hz=${POSE_STREAM_RATE_HZ}"
+fi
+if [[ -n "${FRAME_SAMPLE_DIR}" && "${FRAME_SAMPLE_EVERY_N}" != "0" ]]; then
+  echo "[run] frame_sampling dir=${FRAME_SAMPLE_DIR} every_n=${FRAME_SAMPLE_EVERY_N} pcd_pixel_stride=${FRAME_SAMPLE_PCD_PIXEL_STRIDE}"
 fi
 exec "${CMD[@]}"

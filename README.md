@@ -164,6 +164,16 @@ python windows_stream_zmq.py --endpoint tcp://<linux_tailscale_ip>:5555 --device
 - Linux bridge sensor mode can be switched with `SENSOR_MODE`:
   - RGB-D (default): `SENSOR_MODE=rgbd ./scripts/run_linux_orbslam3.sh`
   - RGB only (monocular): `SENSOR_MODE=monocular ./scripts/run_linux_orbslam3.sh`
+- Frame sampling is enabled by default in the Linux bridge:
+  - Every 15 frames it saves:
+    - RGB image (`*_rgb.jpg`)
+    - depth-derived point cloud (`*_depth.pcd`)
+    - indexed pose metadata in `samples_index.jsonl` (`seq`, `ts`, `tracking_state`, `t_xyz_m`, `q_xyzw`, paths)
+  - Output root: `outputs/frame_samples/run_<timestamp>_pid<id>/`
+  - Configure with env vars:
+    - `FRAME_SAMPLE_EVERY_N` (default `15`, set `0` to disable)
+    - `FRAME_SAMPLE_DIR` (default `outputs/frame_samples`)
+    - `FRAME_SAMPLE_PCD_PIXEL_STRIDE` (default `1`, use `2` or `4` for lighter files)
 
 ## UWB-Initialized Global Frame (Anchor + Worker v1)
 
@@ -179,6 +189,36 @@ Outputs are written under `outputs/fusion/<session_id>/`:
 - `calibration_result.json`
 - `matched_samples.jsonl`
 - `trajectory_global_tum.txt`
+
+### Offline: transform `samples_index.jsonl` to global poses
+
+If you already have sampled ORB poses and want to map them into the UWB/global frame offline:
+
+```bash
+python scripts/transform_samples_to_global.py \
+  --samples-index outputs/frame_samples/run_<run_id>/samples_index.jsonl \
+  --calibration-result outputs/fusion/<session_id>/calibration_result.json \
+  --output-jsonl outputs/frame_samples/run_<run_id>/samples_global.jsonl \
+  --output-tum outputs/frame_samples/run_<run_id>/trajectory_global_tum.txt
+```
+
+If calibration did not complete but you know one bootstrap global position+yaw (from UWB/image notes), you can build `T_G_Lw` from a single ORB sample:
+
+```bash
+python scripts/transform_samples_to_global.py \
+  --samples-index outputs/frame_samples/run_<run_id>/samples_index.jsonl \
+  --bootstrap \
+  --global-xyz 1.2 -0.4 0.8 \
+  --global-yaw-q-wxyz 0.96 0.0 0.0 0.28 \
+  --bootstrap-sample-id 0 \
+  --output-jsonl outputs/frame_samples/run_<run_id>/samples_global_bootstrap.jsonl \
+  --write-transform-file outputs/frame_samples/run_<run_id>/T_G_Lw_bootstrap.json
+```
+
+Notes:
+- The script expects sample quaternions in `q_xyzw` order.
+- For yaw input, it supports `--global-yaw-rad`, `--global-yaw-deg`, `--global-yaw-q-xyzw`, or `--global-yaw-q-wxyz`.
+- If your streamed ORB pose behaves like `Tcw` (world->camera), try `--invert-local-pose`.
 
 ### Linux startup (fusion + ORB bridge pose stream)
 

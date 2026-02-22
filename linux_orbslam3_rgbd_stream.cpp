@@ -63,6 +63,9 @@ struct Options {
   std::string node_id = "worker_node";
   std::string session_id = "session_default";
   double pose_stream_rate_hz = 15.0;
+  std::string sample_output_dir;
+  int sample_every_n = 15;
+  int sample_pcd_pixel_stride = 1;
 };
 
 struct FrameMeta {
@@ -103,6 +106,9 @@ void PrintUsage(const char* prog) {
       << "  --node-id <worker_id>            Default: worker_node\n"
       << "  --session-id <session_id>        Default: session_default\n"
       << "  --pose-stream-rate-hz <double>   Default: 15.0\n"
+      << "  --sample-output-dir <path>       Save periodic rgb/pcd samples (empty disables)\n"
+      << "  --sample-every-n <int>           Sample period in frames, default: 15\n"
+      << "  --sample-pcd-pixel-stride <int>  Depth pixel stride for pcd save, default: 1\n"
       << "  --trajectory <path.txt>          Save TUM trajectory on shutdown\n"
       << "  --keyframe-trajectory <path.txt> Save TUM keyframe trajectory on shutdown\n"
       << "  --pointcloud <path.ply>          Save tracked map points as PLY on shutdown\n";
@@ -196,6 +202,18 @@ bool ParseArgs(int argc, char** argv, Options* options) {
       if (!need_double(arg, &options->pose_stream_rate_hz)) {
         return false;
       }
+    } else if (arg == "--sample-output-dir") {
+      if (!need_value(arg, &options->sample_output_dir)) {
+        return false;
+      }
+    } else if (arg == "--sample-every-n") {
+      if (!need_int(arg, &options->sample_every_n)) {
+        return false;
+      }
+    } else if (arg == "--sample-pcd-pixel-stride") {
+      if (!need_int(arg, &options->sample_pcd_pixel_stride)) {
+        return false;
+      }
     } else if (arg == "--rcv-hwm") {
       if (!need_int(arg, &options->rcv_hwm)) {
         return false;
@@ -224,6 +242,14 @@ bool ParseArgs(int argc, char** argv, Options* options) {
   }
   if (options->pose_stream_rate_hz <= 0.0) {
     std::cerr << "--pose-stream-rate-hz must be > 0\n";
+    return false;
+  }
+  if (options->sample_every_n < 0) {
+    std::cerr << "--sample-every-n must be >= 0\n";
+    return false;
+  }
+  if (options->sample_pcd_pixel_stride <= 0) {
+    std::cerr << "--sample-pcd-pixel-stride must be > 0\n";
     return false;
   }
   return true;
@@ -601,6 +627,138 @@ void SavePointCloudPLY(const std::vector<PointXYZ>& points, const std::filesyste
   }
 }
 
+std::string ZeroPad(std::size_t value, int width) {
+  std::ostringstream ss;
+  ss << std::setw(width) << std::setfill('0') << value;
+  return ss.str();
+}
+
+std::string MakeRunStamp() {
+  std::time_t t = std::time(nullptr);
+  std::tm tm {};
+  localtime_r(&t, &tm);
+  char buf[32];
+  if (std::strftime(buf, sizeof(buf), "%Y%m%d_%H%M%S", &tm) == 0) {
+    return std::to_string(static_cast<long long>(t));
+  }
+  return std::string(buf);
+}
+
+bool SaveDepthFrameAsPCD(const cv::Mat& depth_m,
+                         const FrameMeta& meta,
+                         int pixel_stride,
+                         const std::filesystem::path& path,
+                         std::size_t* point_count_out) {
+  if (depth_m.empty() || depth_m.type() != CV_32FC1) {
+    std::cerr << "[sample] invalid depth for pcd export\n";
+    return false;
+  }
+  if (meta.fx <= 0.0 || meta.fy <= 0.0) {
+    std::cerr << "[sample] invalid intrinsics for pcd export\n";
+    return false;
+  }
+  if (pixel_stride <= 0) {
+    std::cerr << "[sample] invalid pixel stride for pcd export\n";
+    return false;
+  }
+
+  const auto parent = path.parent_path();
+  if (!parent.empty()) {
+    std::filesystem::create_directories(parent);
+  }
+
+  std::size_t point_count = 0;
+  for (int v = 0; v < depth_m.rows; v += pixel_stride) {
+    const float* row_ptr = depth_m.ptr<float>(v);
+    for (int u = 0; u < depth_m.cols; u += pixel_stride) {
+      const float z = row_ptr[u];
+      if (!std::isfinite(z) || z <= 0.0f) {
+        continue;
+      }
+      ++point_count;
+    }
+  }
+
+  std::ofstream out(path);
+  if (!out) {
+    std::cerr << "[sample] failed to open pcd output: " << path << "\n";
+    return false;
+  }
+  out << "# .PCD v0.7 - Point Cloud Data file format\n";
+  out << "VERSION 0.7\n";
+  out << "FIELDS x y z\n";
+  out << "SIZE 4 4 4\n";
+  out << "TYPE F F F\n";
+  out << "COUNT 1 1 1\n";
+  out << "WIDTH " << point_count << "\n";
+  out << "HEIGHT 1\n";
+  out << "VIEWPOINT 0 0 0 1 0 0 0\n";
+  out << "POINTS " << point_count << "\n";
+  out << "DATA ascii\n";
+  out << std::fixed << std::setprecision(6);
+
+  for (int v = 0; v < depth_m.rows; v += pixel_stride) {
+    const float* row_ptr = depth_m.ptr<float>(v);
+    for (int u = 0; u < depth_m.cols; u += pixel_stride) {
+      const float z = row_ptr[u];
+      if (!std::isfinite(z) || z <= 0.0f) {
+        continue;
+      }
+      const float x = static_cast<float>((static_cast<double>(u) - meta.cx) * z / meta.fx);
+      const float y = static_cast<float>((static_cast<double>(v) - meta.cy) * z / meta.fy);
+      out << x << " " << y << " " << z << "\n";
+    }
+  }
+
+  if (point_count_out != nullptr) {
+    *point_count_out = point_count;
+  }
+  return true;
+}
+
+bool SaveRgbFrameImage(const cv::Mat& rgb_for_orb,
+                       const FrameMeta& meta,
+                       const std::filesystem::path& path) {
+  if (rgb_for_orb.empty()) {
+    std::cerr << "[sample] empty rgb frame\n";
+    return false;
+  }
+  const auto parent = path.parent_path();
+  if (!parent.empty()) {
+    std::filesystem::create_directories(parent);
+  }
+
+  cv::Mat rgb_bgr;
+  if (meta.rgb_encoding == "RGB") {
+    cv::cvtColor(rgb_for_orb, rgb_bgr, cv::COLOR_RGB2BGR);
+  } else {
+    rgb_bgr = rgb_for_orb;
+  }
+
+  std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 95};
+  if (!cv::imwrite(path.string(), rgb_bgr, params)) {
+    std::cerr << "[sample] failed to write rgb image: " << path << "\n";
+    return false;
+  }
+  return true;
+}
+
+bool AppendJsonLine(const std::filesystem::path& path, const Json::Value& root) {
+  const auto parent = path.parent_path();
+  if (!parent.empty()) {
+    std::filesystem::create_directories(parent);
+  }
+  std::ofstream out(path, std::ios::app);
+  if (!out) {
+    std::cerr << "[sample] failed to append jsonl: " << path << "\n";
+    return false;
+  }
+  Json::StreamWriterBuilder builder;
+  builder["indentation"] = "";
+  out << Json::writeString(builder, root) << "\n";
+  return true;
+}
+
 struct UdpPoseStream {
   int sock_fd = -1;
   sockaddr_in addr {};
@@ -721,6 +879,12 @@ int main(int argc, char** argv) {
   bool pose_stream_ready = false;
   double last_pose_emit_sec = 0.0;
   const double pose_emit_interval = 1.0 / options.pose_stream_rate_hz;
+  const bool sample_enabled = options.sample_every_n > 0 && !options.sample_output_dir.empty();
+  bool sample_ready = false;
+  std::filesystem::path sample_run_dir;
+  std::filesystem::path sample_index_path;
+  std::size_t sample_frame_count = 0;
+  std::size_t sample_record_count = 0;
 
   if (pose_stream_enabled) {
     if (options.pose_stream_endpoint.rfind("ws://", 0) == 0 ||
@@ -736,6 +900,22 @@ int main(int argc, char** argv) {
       } else {
         std::cerr << "[pose-stream] disabled due to endpoint parse failure\n";
       }
+    }
+  }
+
+  if (sample_enabled) {
+    try {
+      sample_run_dir = std::filesystem::path(options.sample_output_dir) /
+                       ("run_" + MakeRunStamp() + "_pid" + std::to_string(getpid()));
+      std::filesystem::create_directories(sample_run_dir);
+      sample_index_path = sample_run_dir / "samples_index.jsonl";
+      sample_ready = true;
+      std::cout << "[sample] enabled dir=" << sample_run_dir
+                << " every_n=" << options.sample_every_n
+                << " pcd_pixel_stride=" << options.sample_pcd_pixel_stride << "\n";
+    } catch (const std::exception& exc) {
+      std::cerr << "[sample] disabled: failed to create output dir: " << exc.what() << "\n";
+      sample_ready = false;
     }
   }
 
@@ -788,6 +968,7 @@ int main(int argc, char** argv) {
     } else {
       T_Lw_Cw = slam->TrackMonocular(rgb, meta.ts);
     }
+    const int tracking_state = slam->GetTrackingState();
 
     if (pose_stream_ready) {
       const double now = MonotonicNowSec();
@@ -800,7 +981,7 @@ int main(int argc, char** argv) {
         root["session_id"] = options.session_id;
         root["node_id"] = options.node_id;
         root["ts_ms"] = static_cast<Json::Int64>(std::llround(meta.ts * 1000.0));
-        root["tracking_state"] = slam->GetTrackingState();
+        root["tracking_state"] = tracking_state;
 
         Json::Value t_xyz(Json::arrayValue);
         t_xyz.append(t.x());
@@ -829,6 +1010,70 @@ int main(int argc, char** argv) {
           std::cerr << "[pose-stream] sendto failed\n";
         }
         last_pose_emit_sec = now;
+      }
+    }
+
+    ++sample_frame_count;
+    if (sample_ready &&
+        (sample_frame_count % static_cast<std::size_t>(options.sample_every_n) == 0)) {
+      const std::size_t sample_id = sample_record_count++;
+      const std::string sample_tag = "sample_" + ZeroPad(sample_id, 6);
+      const std::string seq_tag =
+          meta.seq >= 0 ? ("seq" + std::to_string(meta.seq)) : std::string("seq_unknown");
+      const std::string basename = sample_tag + "_" + seq_tag;
+
+      const std::filesystem::path rgb_path = sample_run_dir / (basename + "_rgb.jpg");
+      bool rgb_saved = SaveRgbFrameImage(rgb, meta, rgb_path);
+
+      std::filesystem::path pcd_path;
+      bool pcd_saved = false;
+      std::size_t pcd_points = 0;
+      if (use_rgbd) {
+        pcd_path = sample_run_dir / (basename + "_depth.pcd");
+        pcd_saved = SaveDepthFrameAsPCD(
+            depth_m, meta, options.sample_pcd_pixel_stride, pcd_path, &pcd_points);
+      }
+
+      const Eigen::Vector3f t = T_Lw_Cw.translation();
+      const Eigen::Quaternionf q = T_Lw_Cw.unit_quaternion();
+      Json::Value record;
+      record["sample_id"] = static_cast<Json::UInt64>(sample_id);
+      record["frame_index"] = static_cast<Json::UInt64>(sample_frame_count);
+      record["seq"] = meta.seq;
+      record["ts"] = meta.ts;
+      record["tracking_state"] = tracking_state;
+      record["pose_frame"] = "T_Lw_Cw";
+      record["rgb_path"] = rgb_saved ? rgb_path.string() : "";
+      record["rgb_saved"] = rgb_saved;
+      if (use_rgbd) {
+        if (pcd_saved) {
+          record["pcd_path"] = pcd_path.string();
+        } else {
+          record["pcd_path"] = Json::nullValue;
+        }
+        record["pcd_saved"] = pcd_saved;
+        record["pcd_points"] = static_cast<Json::UInt64>(pcd_points);
+        record["pcd_pixel_stride"] = options.sample_pcd_pixel_stride;
+      }
+
+      Json::Value t_xyz(Json::arrayValue);
+      t_xyz.append(t.x());
+      t_xyz.append(t.y());
+      t_xyz.append(t.z());
+      record["t_xyz_m"] = t_xyz;
+
+      Json::Value q_xyzw(Json::arrayValue);
+      q_xyzw.append(q.x());
+      q_xyzw.append(q.y());
+      q_xyzw.append(q.z());
+      q_xyzw.append(q.w());
+      record["q_xyzw"] = q_xyzw;
+
+      if (AppendJsonLine(sample_index_path, record)) {
+        std::cout << "[sample] id=" << sample_id << " frame=" << sample_frame_count
+                  << " seq=" << meta.seq << " rgb_saved=" << (rgb_saved ? 1 : 0)
+                  << " pcd_saved=" << (pcd_saved ? 1 : 0)
+                  << " pcd_points=" << pcd_points << "\n";
       }
     }
 
