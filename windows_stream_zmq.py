@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -76,6 +77,42 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="Optional output height for both RGB and depth (0 = keep source)",
+    )
+    parser.add_argument(
+        "--save-root",
+        type=Path,
+        default=None,
+        help="Optional folder to save per-frame RGB/depth/meta/PCD while streaming",
+    )
+    parser.add_argument(
+        "--save-every-n",
+        type=int,
+        default=1,
+        help="Save every Nth frame (default: 1)",
+    )
+    parser.add_argument(
+        "--save-rgb-jpeg-quality",
+        type=int,
+        default=95,
+        help="JPEG quality for saved RGB frames [1..100]",
+    )
+    parser.add_argument(
+        "--save-pcd-stride",
+        type=int,
+        default=2,
+        help="Pixel stride for point cloud generation (1 = full res, default: 2)",
+    )
+    parser.add_argument(
+        "--save-pcd-min-depth",
+        type=float,
+        default=0.05,
+        help="Minimum valid depth (meters) for saved PCD",
+    )
+    parser.add_argument(
+        "--save-pcd-max-depth",
+        type=float,
+        default=8.0,
+        help="Maximum valid depth (meters) for saved PCD",
     )
     return parser
 
@@ -158,8 +195,128 @@ def _resize_rgbd(
     )
 
 
+def _depth_to_xyz(
+    depth_m: np.ndarray,
+    fx: float,
+    fy: float,
+    cx: float,
+    cy: float,
+    stride: int,
+    min_depth_m: float,
+    max_depth_m: float,
+) -> np.ndarray:
+    step = max(1, int(stride))
+    sampled = depth_m[::step, ::step]
+
+    y_idx, x_idx = np.indices(sampled.shape, dtype=np.float32)
+    x_pix = x_idx * float(step)
+    y_pix = y_idx * float(step)
+
+    z = sampled
+    valid = np.isfinite(z) & (z >= float(min_depth_m)) & (z <= float(max_depth_m))
+    if not np.any(valid):
+        return np.empty((0, 3), dtype=np.float32)
+
+    z_v = z[valid].astype(np.float32, copy=False)
+    x_v = ((x_pix[valid] - float(cx)) * z_v / float(fx)).astype(np.float32, copy=False)
+    y_v = ((y_pix[valid] - float(cy)) * z_v / float(fy)).astype(np.float32, copy=False)
+    return np.column_stack((x_v, y_v, z_v)).astype(np.float32, copy=False)
+
+
+def _write_pcd_xyz_binary(path: Path, points_xyz: np.ndarray) -> None:
+    n = int(points_xyz.shape[0])
+    header = (
+        "# .PCD v0.7 - Point Cloud Data file format\n"
+        "VERSION 0.7\n"
+        "FIELDS x y z\n"
+        "SIZE 4 4 4\n"
+        "TYPE F F F\n"
+        "COUNT 1 1 1\n"
+        f"WIDTH {n}\n"
+        "HEIGHT 1\n"
+        "VIEWPOINT 0 0 0 1 0 0 0\n"
+        f"POINTS {n}\n"
+        "DATA binary\n"
+    )
+    with path.open("wb") as f:
+        f.write(header.encode("ascii"))
+        if n > 0:
+            np.ascontiguousarray(points_xyz, dtype=np.float32).tofile(f)
+
+
+def _save_frame_artifacts(
+    *,
+    save_root: Path,
+    seq: int,
+    ts: float,
+    bgr: np.ndarray,
+    depth_m: np.ndarray,
+    fx: float,
+    fy: float,
+    cx: float,
+    cy: float,
+    rgb_jpeg_quality: int,
+    pcd_stride: int,
+    pcd_min_depth: float,
+    pcd_max_depth: float,
+) -> None:
+    rgb_dir = save_root / "rgb"
+    depth_dir = save_root / "depth"
+    pcd_dir = save_root / "pcd"
+    meta_dir = save_root / "meta"
+    rgb_dir.mkdir(parents=True, exist_ok=True)
+    depth_dir.mkdir(parents=True, exist_ok=True)
+    pcd_dir.mkdir(parents=True, exist_ok=True)
+    meta_dir.mkdir(parents=True, exist_ok=True)
+
+    stem = f"{seq:08d}"
+    rgb_path = rgb_dir / f"{stem}.jpg"
+    depth_path = depth_dir / f"{stem}.npy"
+    pcd_path = pcd_dir / f"{stem}.pcd"
+    meta_path = meta_dir / f"{stem}.json"
+
+    ok = cv2.imwrite(str(rgb_path), bgr, [cv2.IMWRITE_JPEG_QUALITY, int(np.clip(rgb_jpeg_quality, 1, 100))])
+    if not ok:
+        raise RuntimeError(f"Failed to save RGB image to {rgb_path}")
+    np.save(depth_path, depth_m.astype(np.float32, copy=False))
+
+    points_xyz = _depth_to_xyz(
+        depth_m=depth_m,
+        fx=fx,
+        fy=fy,
+        cx=cx,
+        cy=cy,
+        stride=pcd_stride,
+        min_depth_m=pcd_min_depth,
+        max_depth_m=pcd_max_depth,
+    )
+    _write_pcd_xyz_binary(pcd_path, points_xyz)
+
+    meta = {
+        "seq": int(seq),
+        "ts": float(ts),
+        "w": int(bgr.shape[1]),
+        "h": int(bgr.shape[0]),
+        "fx": float(fx),
+        "fy": float(fy),
+        "cx": float(cx),
+        "cy": float(cy),
+        "depth_encoding": "f32_meters",
+        "pcd_points": int(points_xyz.shape[0]),
+        "pcd_stride": int(max(1, pcd_stride)),
+        "pcd_min_depth_m": float(pcd_min_depth),
+        "pcd_max_depth_m": float(pcd_max_depth),
+        "rgb_path": str(rgb_path.name),
+        "depth_path": str(depth_path.name),
+        "pcd_path": str(pcd_path.name),
+    }
+    meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+
 def main() -> None:
     args = _build_arg_parser().parse_args()
+    if args.save_every_n <= 0:
+        raise ValueError("--save-every-n must be >= 1")
 
     topic = args.topic.encode("ascii")
     compressor = zstd.ZstdCompressor(level=args.zstd_level)
@@ -190,6 +347,17 @@ def main() -> None:
     t_next = t_log
     printed_intrinsics = False
     printed_resize = False
+    saved_frames = 0
+
+    save_root: Path | None = None
+    if args.save_root is not None:
+        save_root = args.save_root.expanduser().resolve()
+        save_root.mkdir(parents=True, exist_ok=True)
+        print(f"[save] enabled root: {save_root}")
+        print(
+            f"[save] cadence=1/{args.save_every_n}, pcd_stride={max(1, args.save_pcd_stride)}, "
+            f"pcd_depth=[{args.save_pcd_min_depth:.2f},{args.save_pcd_max_depth:.2f}] m"
+        )
 
     try:
         while True:
@@ -258,6 +426,24 @@ def main() -> None:
 
             sock.send_multipart([topic, header_bytes, rgb_bytes, depth_zstd], copy=False)
 
+            if save_root is not None and (frame.seq % args.save_every_n == 0):
+                _save_frame_artifacts(
+                    save_root=save_root,
+                    seq=frame.seq,
+                    ts=frame.timestamp,
+                    bgr=bgr,
+                    depth_m=depth_m,
+                    fx=fx,
+                    fy=fy,
+                    cx=cx,
+                    cy=cy,
+                    rgb_jpeg_quality=args.save_rgb_jpeg_quality,
+                    pcd_stride=args.save_pcd_stride,
+                    pcd_min_depth=args.save_pcd_min_depth,
+                    pcd_max_depth=args.save_pcd_max_depth,
+                )
+                saved_frames += 1
+
             frames += 1
             bytes_sent += len(header_bytes) + len(rgb_bytes) + len(depth_zstd)
 
@@ -268,7 +454,8 @@ def main() -> None:
                 fps = frames / elapsed
                 print(
                     f"[stream] seq={frame.seq} fps={fps:.1f} "
-                    f"tx={mbps:.2f} Mbps rgb={len(rgb_bytes)}B depth={len(depth_zstd)}B"
+                    f"tx={mbps:.2f} Mbps rgb={len(rgb_bytes)}B depth={len(depth_zstd)}B "
+                    f"saved={saved_frames}"
                 )
                 frames = 0
                 bytes_sent = 0

@@ -150,6 +150,12 @@ For better realtime performance, downscale before streaming:
 python windows_stream_zmq.py --endpoint tcp://<linux_tailscale_ip>:5555 --device-index 0 --depth-units auto --source-color-order RGB --jpeg-quality 80 --zstd-level 3 --output-width 640 --output-height 480
 ```
 
+To stream and also save per-frame artifacts (RGB/depth/meta + `pcd` per frame):
+
+```powershell
+python windows_stream_zmq.py --endpoint tcp://<linux_tailscale_ip>:5555 --device-index 0 --depth-units auto --source-color-order RGB --jpeg-quality 80 --zstd-level 3 --save-root .\recordings\session_01 --save-every-n 1 --save-pcd-stride 2
+```
+
 ### Runtime notes
 
 - If colors look wrong, switch `--source-color-order` between `RGB` and `BGR`.
