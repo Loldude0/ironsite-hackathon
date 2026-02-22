@@ -79,7 +79,7 @@ All values below are extracted from artifacts present in this repository, provin
 | **Indexed records written** | 146 | `frames_world.jsonl.summary.json` (Across 3 sessions) |
 | **Filtered records (bad tracking)** | 1 | Proves our tracking-state gating works. |
 | **Merged map vertices** | 46,599 | Header of `map_points.ply` |
-| **Trajectories fused** | 3 (`s1, s2, s3`) | Spanning 2,215 total tracked keyframes. |
+| **Trajectories fused** | 3 (`s1, s2, s3`) | Spanning 1848 total tracked keyframes. |
 | **Solver unit tests** | 7 passed | `python -m unittest tests/test_fusion_solver.py` |
 
 **Hypotheses Validated During Prototyping:**
