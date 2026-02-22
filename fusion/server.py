@@ -121,6 +121,11 @@ class FusionRuntime:
             session.slam_poses.clear()
             if session.trajectory_global_path and session.trajectory_global_path.exists():
                 session.trajectory_global_path.unlink()
+            print(
+                "[fusion] calibration start "
+                f"session={session.session_id} mode={session.calibration_mode} "
+                f"anchor={session.anchor_id} worker={session.worker_id} duration_s={request.duration_s}"
+            )
             return {
                 "status": "ok",
                 "session_id": session.session_id,
@@ -170,6 +175,12 @@ class FusionRuntime:
 
         if session.calibration_status == "calibrated":
             session.T_G_Lw = np.array(result["T_G_Lw"], dtype=np.float64)
+            print(
+                "[fusion] calibrated "
+                f"session={session.session_id} mode=paired_6dof "
+                f"pairs={result.get('sample_pairs', 0)} inliers={result.get('inliers', 0)} "
+                f"rms={result.get('rms_error_m')}"
+            )
 
     def _finalize_initial_xyzyaw_bootstrap(self, session: SessionState, uwb_window: list[UwbSample]) -> None:
         if not uwb_window:
@@ -230,6 +241,11 @@ class FusionRuntime:
         }
         self._write_calibration_result(session)
         self._write_initial_uwb_window(session, uwb_window)
+        print(
+            "[fusion] uwb bootstrap ready "
+            f"session={session.session_id} mode=initial_xyzyaw "
+            f"samples={len(uwb_window)} waiting_for_first_slam_pose=1"
+        )
 
     def _finalize_initial_xyzyaw_with_first_pose(self, session: SessionState, pose: SlamPose) -> None:
         if session.bootstrap_global_position_xyz_m is None or session.bootstrap_global_yaw_rad is None:
@@ -256,6 +272,11 @@ class FusionRuntime:
         session.calibration_result = result
         session.calibration_status = "calibrated"
         self._write_calibration_result(session)
+        print(
+            "[fusion] calibrated "
+            f"session={session.session_id} mode=initial_xyzyaw "
+            f"first_pose_ts_ms={pose.ts_ms}"
+        )
 
     def _write_calibration_result(self, session: SessionState) -> None:
         if session.output_dir is None:
