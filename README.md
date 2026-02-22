@@ -78,3 +78,70 @@ Edit camera params:
 - V           : toggle radius sphere visualization at each hit point
 - H           : print current camera parameters
 - P           : save current camera params to config file
+
+## Live iPhone Record3D USB -> ORB-SLAM3 (Tailscale)
+
+This repo now includes a realtime RGB-D bridge:
+
+- `windows_capture_record3d.py`: Record3D USB capture + validation
+- `windows_stream_zmq.py`: ZMQ sender (`topic + JSON header + JPEG RGB + zstd depth`)
+- `linux_orbslam3_rgbd_stream.cpp`: ZMQ receiver + `TrackRGBD`
+- `configs/iphone_record3d_rgbd.yaml`: ORB-SLAM3 template (intrinsics filled from first frame)
+- `scripts/run_linux_orbslam3.sh`: build + run on Linux
+- `scripts/run_linux_xpra_viewer.sh`: run via xpra for remote Pangolin viewing
+
+### Linux machine (CachyOS) startup
+
+1. Ensure ORB-SLAM3 is built at `~/Projects/ORB_SLAM3` (or set `ORB_SLAM3_ROOT`).
+2. Start receiver + ORB-SLAM3:
+
+```bash
+cd /home/atajne/Projects/ironsite-hackathon
+chmod +x scripts/run_linux_orbslam3.sh scripts/run_linux_xpra_viewer.sh
+./scripts/run_linux_orbslam3.sh
+```
+
+Default listener is `tcp://0.0.0.0:5555` on topic `rgbd`.
+
+Optional (viewer forwarded to Windows with xpra):
+
+```bash
+cd /home/atajne/Projects/ironsite-hackathon
+./scripts/run_linux_xpra_viewer.sh
+```
+
+Then from Windows:
+
+```powershell
+xpra attach tcp:<linux_tailscale_ip>:14500
+```
+
+### Windows machine startup (after cloning this repo)
+
+1. Install Python dependencies:
+
+```powershell
+cd <repo_path>
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+2. Install Record3D Python package/SDK on Windows (from official Record3D docs).
+3. Validate capture first:
+
+```powershell
+python windows_capture_record3d.py --preview --device-index 0 --depth-units auto --source-color-order RGB
+```
+
+4. Stream to Linux over Tailscale:
+
+```powershell
+python windows_stream_zmq.py --endpoint tcp://<linux_tailscale_ip>:5555 --device-index 0 --depth-units auto --source-color-order RGB --jpeg-quality 80 --zstd-level 3
+```
+
+### Runtime notes
+
+- If colors look wrong, switch `--source-color-order` between `RGB` and `BGR`.
+- If scale is wrong, explicitly set `--depth-units meters` or `--depth-units millimeters`.
+- First valid frame populates runtime ORB intrinsics from stream metadata.

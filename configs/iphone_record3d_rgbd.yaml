@@ -1,0 +1,49 @@
+%YAML:1.0
+
+# This file is a template consumed by linux_orbslam3_rgbd_stream.cpp.
+# Tokens below are replaced at runtime from the first incoming frame header.
+File.version: "1.0"
+
+Camera.type: "PinHole"
+
+Camera1.fx: __FX__
+Camera1.fy: __FY__
+Camera1.cx: __CX__
+Camera1.cy: __CY__
+
+# Distortion is left at zero assuming Record3D feed is rectified.
+Camera1.k1: 0.0
+Camera1.k2: 0.0
+Camera1.p1: 0.0
+Camera1.p2: 0.0
+Camera1.k3: 0.0
+
+Camera.width: __WIDTH__
+Camera.height: __HEIGHT__
+Camera.fps: 30.0
+
+# 0 = BGR, 1 = RGB
+Camera.RGB: __CAMERA_RGB__
+
+Stereo.ThDepth: 40.0
+Stereo.b: 0.07732
+
+# Incoming depth from sender is meters.
+RGBD.DepthMapFactor: 1.0
+
+ORBextractor.nFeatures: 1250
+ORBextractor.scaleFactor: 1.2
+ORBextractor.nLevels: 8
+ORBextractor.iniThFAST: 20
+ORBextractor.minThFAST: 7
+
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -1.8
+Viewer.ViewpointF: 500.0
