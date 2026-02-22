@@ -21,6 +21,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -447,8 +448,92 @@ struct PointXYZ {
   float z = 0.0f;
 };
 
-void SavePointCloudPLY(const std::unordered_map<unsigned long, PointXYZ>& points_by_id,
-                       const std::filesystem::path& path) {
+struct PointSample {
+  PointXYZ p;
+  int observations = 0;
+  int seen_count = 0;
+  unsigned map_id = 0;
+};
+
+std::vector<PointXYZ> FilterStablePoints(const std::unordered_map<unsigned long, PointSample>& samples_by_id) {
+  std::vector<const PointSample*> candidates;
+  candidates.reserve(samples_by_id.size());
+  std::unordered_map<unsigned, int> map_hist;
+
+  // Keep points that are seen repeatedly and have enough supporting observations.
+  for (const auto& [id, s] : samples_by_id) {
+    (void)id;
+    if (s.seen_count < 2 || s.observations < 3) {
+      continue;
+    }
+    candidates.push_back(&s);
+    map_hist[s.map_id] += 1;
+  }
+
+  if (candidates.empty()) {
+    return {};
+  }
+
+  // Keep only dominant map to avoid mixing points from different map resets.
+  unsigned dominant_map_id = candidates.front()->map_id;
+  int dominant_count = 0;
+  for (const auto& [map_id, count] : map_hist) {
+    if (count > dominant_count) {
+      dominant_count = count;
+      dominant_map_id = map_id;
+    }
+  }
+
+  std::vector<PointXYZ> dominant_points;
+  dominant_points.reserve(candidates.size());
+  for (const PointSample* s : candidates) {
+    if (s->map_id == dominant_map_id) {
+      dominant_points.push_back(s->p);
+    }
+  }
+  if (dominant_points.empty()) {
+    return {};
+  }
+
+  // Reject extreme outliers by radius from centroid (drop top 5%).
+  float cx = 0.0f;
+  float cy = 0.0f;
+  float cz = 0.0f;
+  for (const PointXYZ& p : dominant_points) {
+    cx += p.x;
+    cy += p.y;
+    cz += p.z;
+  }
+  const float inv_n = 1.0f / static_cast<float>(dominant_points.size());
+  cx *= inv_n;
+  cy *= inv_n;
+  cz *= inv_n;
+
+  std::vector<float> radii;
+  radii.reserve(dominant_points.size());
+  for (const PointXYZ& p : dominant_points) {
+    const float dx = p.x - cx;
+    const float dy = p.y - cy;
+    const float dz = p.z - cz;
+    radii.push_back(std::sqrt(dx * dx + dy * dy + dz * dz));
+  }
+  std::vector<float> sorted_radii = radii;
+  std::sort(sorted_radii.begin(), sorted_radii.end());
+  const std::size_t q95_idx =
+      std::min(sorted_radii.size() - 1, static_cast<std::size_t>(0.95 * sorted_radii.size()));
+  const float radius_limit = sorted_radii[q95_idx];
+
+  std::vector<PointXYZ> filtered;
+  filtered.reserve(dominant_points.size());
+  for (std::size_t i = 0; i < dominant_points.size(); ++i) {
+    if (radii[i] <= radius_limit) {
+      filtered.push_back(dominant_points[i]);
+    }
+  }
+  return filtered;
+}
+
+void SavePointCloudPLY(const std::vector<PointXYZ>& points, const std::filesystem::path& path) {
   const auto parent = path.parent_path();
   if (!parent.empty()) {
     std::filesystem::create_directories(parent);
@@ -460,14 +545,13 @@ void SavePointCloudPLY(const std::unordered_map<unsigned long, PointXYZ>& points
 
   out << "ply\n";
   out << "format ascii 1.0\n";
-  out << "element vertex " << points_by_id.size() << "\n";
+  out << "element vertex " << points.size() << "\n";
   out << "property float x\n";
   out << "property float y\n";
   out << "property float z\n";
   out << "end_header\n";
   out << std::fixed << std::setprecision(6);
-  for (const auto& [id, p] : points_by_id) {
-    (void)id;
+  for (const PointXYZ& p : points) {
     out << p.x << " " << p.y << " " << p.z << "\n";
   }
 }
@@ -528,7 +612,7 @@ int main(int argc, char** argv) {
   std::unique_ptr<ORB_SLAM3::System> slam;
   std::filesystem::path runtime_settings;
   bool slam_initialized = false;
-  std::unordered_map<unsigned long, PointXYZ> map_points_by_id;
+  std::unordered_map<unsigned long, PointSample> map_points_by_id;
   const bool use_rgbd = options.sensor_mode == "rgbd";
 
   std::size_t frames = 0;
@@ -585,11 +669,19 @@ int main(int argc, char** argv) {
       if (mp == nullptr || mp->isBad()) {
         continue;
       }
+      const int observations = mp->Observations();
+      if (observations < 2) {
+        continue;
+      }
       const Eigen::Vector3f p = mp->GetWorldPos();
       if (!std::isfinite(p.x()) || !std::isfinite(p.y()) || !std::isfinite(p.z())) {
         continue;
       }
-      map_points_by_id[mp->mnId] = PointXYZ{p.x(), p.y(), p.z()};
+      auto& sample = map_points_by_id[mp->mnId];
+      sample.p = PointXYZ{p.x(), p.y(), p.z()};
+      sample.observations = std::max(sample.observations, observations);
+      sample.seen_count += 1;
+      sample.map_id = mp->mnOriginMapId;
     }
 
     ++frames;
@@ -628,9 +720,14 @@ int main(int argc, char** argv) {
     }
     if (!options.pointcloud_path.empty() && !map_points_by_id.empty()) {
       try {
-        SavePointCloudPLY(map_points_by_id, options.pointcloud_path);
-        std::cout << "[shutdown] pointcloud saved: " << options.pointcloud_path
-                  << " points=" << map_points_by_id.size() << "\n";
+        const std::vector<PointXYZ> filtered_points = FilterStablePoints(map_points_by_id);
+        if (!filtered_points.empty()) {
+          SavePointCloudPLY(filtered_points, options.pointcloud_path);
+          std::cout << "[shutdown] pointcloud saved: " << options.pointcloud_path
+                    << " points=" << filtered_points.size() << " (filtered)\n";
+        } else {
+          std::cout << "[shutdown] pointcloud not saved: no stable filtered points\n";
+        }
       } catch (const std::exception& exc) {
         std::cerr << "[shutdown] failed to save pointcloud: " << exc.what() << "\n";
       }
