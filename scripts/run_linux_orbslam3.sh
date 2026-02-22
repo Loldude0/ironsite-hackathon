@@ -18,6 +18,11 @@ ZMQ_BIND="${ZMQ_BIND:-1}"            # 1 => receiver binds, 0 => receiver connec
 ENABLE_VIEWER="${ENABLE_VIEWER:-1}"  # 1 => Pangolin on, 0 => off
 TRAJECTORY_PATH="${TRAJECTORY_PATH:-}"
 
+if [[ "${ENABLE_VIEWER}" == "1" && -z "${DISPLAY:-}" ]]; then
+  echo "[run] no DISPLAY detected; disabling Pangolin viewer (set ENABLE_VIEWER=1 once X11/xpra is available)"
+  ENABLE_VIEWER="0"
+fi
+
 if [[ ! -f "${VOCAB_PATH}" ]]; then
   echo "[run] missing vocabulary file: ${VOCAB_PATH}" >&2
   exit 1
