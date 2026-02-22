@@ -157,7 +157,15 @@ class Record3DCapture:
             return
         _, stream_cls, devices = self._load_record3d()
         if not devices:
-            raise RuntimeError("No Record3D devices detected over USB")
+            raise RuntimeError(
+                "No Record3D devices detected over USB.\n"
+                "Troubleshooting:\n"
+                "1) Install iTunes on Windows (Record3D prerequisite).\n"
+                "2) Ensure 'Apple Mobile Device Service' is running.\n"
+                "3) Unlock iPhone, accept 'Trust This Computer'.\n"
+                "4) Open Record3D app on iPhone and enable USB Streaming mode.\n"
+                "5) Use a direct USB cable (avoid hubs/adapters during setup)."
+            )
         if self.device_index < 0 or self.device_index >= len(devices):
             raise RuntimeError(
                 f"device_index {self.device_index} out of range (found {len(devices)} devices)"
