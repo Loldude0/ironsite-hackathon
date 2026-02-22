@@ -52,6 +52,18 @@ Optional arguments:
 - `--max-frames` stop after saving a number of frames
 - `--topic` omit to auto-pick first PointCloud2 topic in the bag
 
+### 5) Record iPhone LiDAR (ARVOS websocket) to `.pcd` + pose JSON
+
+```bash
+python arvos_server.py --port 9090 --output-dir data/arvos_capture
+```
+
+Output structure:
+- `data/arvos_capture/pcd/*.pcd`
+- `data/arvos_capture/pose/*.json`
+
+Each pose JSON includes camera position/orientation fields when provided by stream payload (quaternion, Euler, rotation matrix, and raw pose payload).
+
 ### Controls
 
 - Left drag: rotate

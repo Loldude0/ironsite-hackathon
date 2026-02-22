@@ -5,3 +5,4 @@ ultralytics
 onnx
 opencv-python
 rosbags
+arvos
