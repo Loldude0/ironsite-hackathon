@@ -1,10 +1,10 @@
-# Ironsite: 4D Spatial Memory and UWB-Anchored SLAM for Construction
+# AnchorVision: 4D Spatial Memory and UWB-Anchored SLAM for Construction
 
 ## Judge TL;DR
 
-Ironsite is a cross-platform system that transforms mobile video scans into a **globally anchored, queryable 4D construction memory**.
+AnchorVision is a cross-platform system that transforms mobile video scans into a **globally anchored, queryable 4D construction memory**.
 
-Traditional SLAM fails in construction because sites are GPS-denied, visually repetitive, and highly dynamic. Ironsite solves this by combining:
+Traditional SLAM fails in construction because sites are GPS-denied, visually repetitive, and highly dynamic. AnchorVision solves this by combining:
 
 1. **RGB-D SLAM** for high-fidelity local geometry.
 2. **UWB (Ultra-Wideband) Ranging** for sparse global anchoring, eliminating the need for overlap-heavy loop closures across multi-agent sessions.
@@ -47,7 +47,7 @@ We answer not only *what is the geometry*, but *what is where, and when*.
 
 ---
 
-## 🚀 Product Features: What Ironsite Actually Does
+## 🚀 Product Features: What AnchorVision Actually Does
 
 Our web frontend acts as a 4D spatial memory interface, bringing the research to life:
 
